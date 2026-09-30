@@ -6,7 +6,7 @@ set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 umask 077
-VERSION=1.0.4
+VERSION=1.0.5
 BASE=/var/lib/linux-server-tool
 SELF=/usr/local/sbin/lts-tool
 KEY_CONFIG=/etc/lts-tool/root_authorized_keys
@@ -52,11 +52,14 @@ install_self() {
 update_tool() (
     no_pending
     need curl; need sha256sum
-    local stage staged='' expected filename
-    local base=https://raw.githubusercontent.com/gitttzr/lts-tool/main
+    local stage staged='' expected filename revision base
+    say "当前版本：$VERSION；正在解析最新版本并下载校验……"
+    revision=$(curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 15 --max-time 60 \
+        -H 'Accept: application/vnd.github.sha' https://api.github.com/repos/gitttzr/lts-tool/commits/main) || return $?
+    [[ $revision =~ ^[0-9a-f]{40}$ ]] || die '无法获取有效版本编号，保留当前版本。'
+    base=https://raw.githubusercontent.com/gitttzr/lts-tool/$revision
     stage=$(mktemp -d "$BASE/update.XXXXXXXX") || return $?
     trap 'rm -f -- "$stage/linux-server-tool.sh" "$stage/checksum" "$stage/previous"; rmdir -- "$stage"; [[ -z $staged ]] || rm -f -- "$staged"' EXIT
-    say "当前版本：$VERSION；正在下载并校验最新工具……"
     curl --proto '=https' --tlsv1.2 -fSL --retry 3 --connect-timeout 15 --max-time 180 \
         "$base/linux-server-tool.sh" -o "$stage/linux-server-tool.sh" || return $?
     curl --proto '=https' --tlsv1.2 -fSL --retry 3 --connect-timeout 15 --max-time 60 \

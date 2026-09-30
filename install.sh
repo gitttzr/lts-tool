@@ -21,7 +21,10 @@ for cmd in curl sha256sum ssh-keygen flock; do
 done
 stage=$(mktemp -d)
 trap 'rm -f -- "$stage/linux-server-tool.sh" "$stage/checksum"; rmdir -- "$stage"' EXIT
-base=https://raw.githubusercontent.com/gitttzr/lts-tool/main
+revision=$(curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 15 --max-time 60 \
+    -H 'Accept: application/vnd.github.sha' https://api.github.com/repos/gitttzr/lts-tool/commits/main)
+[[ $revision =~ ^[0-9a-f]{40}$ ]] || { echo '无法获取有效版本编号，停止安装。' >&2; exit 1; }
+base=https://raw.githubusercontent.com/gitttzr/lts-tool/$revision
 curl --proto '=https' --tlsv1.2 -fSL --retry 3 --connect-timeout 15 --max-time 180 \
     "$base/linux-server-tool.sh" -o "$stage/linux-server-tool.sh"
 curl --proto '=https' --tlsv1.2 -fSL --retry 3 --connect-timeout 15 --max-time 60 \

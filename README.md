@@ -50,7 +50,7 @@ Tailscale 菜单第 9 项分为「正常登录/恢复连接」和「强制重新
 
 **更新工具：**一键更新到仓库 main 分支最新版本、查看当前版本和更新来源。更新成功会自动重新打开新版主菜单。
 
-也可直接运行 `sudo lts-tool --update`，或用 `lts-tool --version` 查看版本。更新先下载文件，验证 SHA-256 及 Bash 语法，再原子替换工具；下载或校验失败保留当前版本。相同内容不重复安装。更新保留 `/etc/lts-tool/root_authorized_keys`、已有 SSH 授权和临时密钥记录，不修改 SSH/Tailscale 设置。存在待确认的 SSH 修改时，请先确认或回退后再更新。
+也可直接运行 `sudo lts-tool --update`，或用 `lts-tool --version` 查看版本。安装器和更新器先通过 GitHub API 获取 main 的提交编号，再从同一固定提交下载脚本与校验文件，避免分支缓存版本不一致；API 不可达或受限时停止并保留旧版本。更新验证 SHA-256 及 Bash 语法，再原子替换工具；下载或校验失败保留当前版本。相同内容不重复安装。更新保留 `/etc/lts-tool/root_authorized_keys`、已有 SSH 授权和临时密钥记录，不修改 SSH/Tailscale 设置。存在待确认的 SSH 修改时，请先确认或回退后再更新。
 
 菜单更新会在 `/var/lib/linux-server-tool/lts-tool.previous` 保留上一版程序，可在控制台用 `sudo install -m 700 /var/lib/linux-server-tool/lts-tool.previous /usr/local/sbin/lts-tool` 恢复。直接重新运行安装器也能更新，但不会额外生成这份上一版备份。
 

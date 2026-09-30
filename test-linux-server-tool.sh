@@ -193,6 +193,11 @@ say 'PASS: hostname survives login profile reset, blank keeps name, failed login
             esac
         done
         echo request >> "$work/update-requests"
+        if [[ $url == https://api.github.com/repos/gitttzr/lts-tool/commits/main ]]; then
+            printf '%s\n' "${mock_revision:-1111111111111111111111111111111111111111}"
+            return
+        fi
+        [[ $url == https://raw.githubusercontent.com/gitttzr/lts-tool/1111111111111111111111111111111111111111/* ]] || return 99
         if [[ $url == *.sha256 ]]; then cp "$work/update-download/checksum" "$output"
         else cp "$work/update-download/linux-server-tool.sh" "$output"; fi
     }
@@ -211,6 +216,10 @@ say 'PASS: hostname survives login profile reset, blank keeps name, failed login
     if (update_tool) > /dev/null 2>&1; then exit 1; fi
     cmp "$SELF" "$work/update-download/linux-server-tool.sh"
     download_failure=no
+    mock_revision='invalid-revision'
+    if (update_tool) > /dev/null 2>&1; then exit 1; fi
+    cmp "$SELF" "$work/update-download/linux-server-tool.sh"
+    unset mock_revision
     cp "$SELF" "$work/update-known-good"
     printf 'if broken syntax\n' > "$work/update-download/linux-server-tool.sh"
     (cd "$work/update-download"; sha256sum --text linux-server-tool.sh > checksum)
