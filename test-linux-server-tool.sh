@@ -170,3 +170,56 @@ say 'PASS: legacy public-key migration as data, existing configuration preserved
     [[ ! -s $log ]]
 )
 say 'PASS: hostname survives login profile reset, blank keeps name, failed login never reports success, invalid name rejected'
+
+(
+    BASE=$work/update-state
+    SELF=$work/update-bin/lts-tool
+    KEY_CONFIG=$work/update-config/root_authorized_keys
+    mkdir -p "$BASE/temporary-keys/example" "${SELF%/*}" "${KEY_CONFIG%/*}" "$work/update-download"
+    printf '#!/usr/bin/env bash\necho old\n' > "$SELF"
+    cp "$SELF" "$work/update-old"
+    cp "$work/permanent.pub" "$KEY_CONFIG"
+    echo keep-temporary-key > "$BASE/temporary-keys/example/record"
+    printf '#!/usr/bin/env bash\necho new\n' > "$work/update-download/linux-server-tool.sh"
+    (cd "$work/update-download"; sha256sum --text linux-server-tool.sh > checksum)
+    curl() {
+        local url='' output=''
+        [[ ${download_failure:-no} == no ]] || return 22
+        while (($#)); do
+            case $1 in
+                https://*) url=$1; shift;;
+                -o) output=$2; shift 2;;
+                *) shift;;
+            esac
+        done
+        echo request >> "$work/update-requests"
+        if [[ $url == *.sha256 ]]; then cp "$work/update-download/checksum" "$output"
+        else cp "$work/update-download/linux-server-tool.sh" "$output"; fi
+    }
+    update_tool > /dev/null
+    cmp "$SELF" "$work/update-download/linux-server-tool.sh"
+    cmp "$BASE/lts-tool.previous" "$work/update-old"
+    cmp "$KEY_CONFIG" "$work/permanent.pub"
+    grep -qx keep-temporary-key "$BASE/temporary-keys/example/record"
+    update_tool > "$work/update-current-output"
+    grep -q '已经是仓库最新版本' "$work/update-current-output"
+    cmp "$BASE/lts-tool.previous" "$work/update-old"
+    printf '%064d  linux-server-tool.sh\n' 0 > "$work/update-download/checksum"
+    if (update_tool) > /dev/null 2>&1; then exit 1; fi
+    cmp "$SELF" "$work/update-download/linux-server-tool.sh"
+    download_failure=yes
+    if (update_tool) > /dev/null 2>&1; then exit 1; fi
+    cmp "$SELF" "$work/update-download/linux-server-tool.sh"
+    download_failure=no
+    cp "$SELF" "$work/update-known-good"
+    printf 'if broken syntax\n' > "$work/update-download/linux-server-tool.sh"
+    (cd "$work/update-download"; sha256sum --text linux-server-tool.sh > checksum)
+    if (update_tool) > /dev/null 2>&1; then exit 1; fi
+    cmp "$SELF" "$work/update-known-good"
+    echo pending > "$BASE/pending"
+    : > "$work/update-requests"
+    if (update_tool) > /dev/null 2>&1; then exit 1; fi
+    [[ ! -s $work/update-requests ]]
+    [[ -z $(find "$BASE" -maxdepth 1 -name 'update.*' -print) ]]
+)
+say 'PASS: update replacement and backup, config/key preservation, no-op update, checksum/download/syntax failure and pending SSH protection'

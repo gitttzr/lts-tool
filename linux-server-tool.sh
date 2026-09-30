@@ -6,6 +6,7 @@ set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 umask 077
+VERSION=1.0.2
 BASE=/var/lib/linux-server-tool
 SELF=/usr/local/sbin/lts-tool
 KEY_CONFIG=/etc/lts-tool/root_authorized_keys
@@ -38,6 +39,54 @@ install_self() {
         install -m 700 "$src" "$staged"
         mv -f -- "$staged" "$SELF"
     fi
+}
+update_tool() (
+    no_pending
+    need curl; need sha256sum
+    local stage staged='' expected filename
+    local base=https://raw.githubusercontent.com/gitttzr/lts-tool/main
+    stage=$(mktemp -d "$BASE/update.XXXXXXXX") || return $?
+    trap 'rm -f -- "$stage/linux-server-tool.sh" "$stage/checksum" "$stage/previous"; rmdir -- "$stage"; [[ -z $staged ]] || rm -f -- "$staged"' EXIT
+    say "当前版本：$VERSION；正在下载并校验最新工具……"
+    curl --proto '=https' --tlsv1.2 -fSL --retry 3 --connect-timeout 15 --max-time 180 \
+        "$base/linux-server-tool.sh" -o "$stage/linux-server-tool.sh" || return $?
+    curl --proto '=https' --tlsv1.2 -fSL --retry 3 --connect-timeout 15 --max-time 60 \
+        "$base/linux-server-tool.sh.sha256" -o "$stage/checksum" || return $?
+    read -r expected filename < "$stage/checksum" || return $?
+    [[ $expected =~ ^[0-9a-f]{64}$ && $filename == linux-server-tool.sh ]] || die '下载校验清单格式不正确，保留当前版本。'
+    printf '%s  %s\n' "$expected" "$stage/linux-server-tool.sh" | sha256sum --check --status || die '下载校验失败，保留当前版本；请稍后重试。'
+    bash -n "$stage/linux-server-tool.sh" || die '新版语法检查失败，保留当前版本。'
+    if cmp -s "$SELF" "$stage/linux-server-tool.sh"; then
+        say '已经是仓库最新版本，无需更新。'
+        return 0
+    fi
+    # Replace only the executable; never invoke --install under our held lock.
+    # Keep the previous executable for manual recovery, but no config snapshots.
+    cp -p -- "$SELF" "$stage/previous" || return $?
+    chmod 700 "$stage/previous" || return $?
+    mv -f -- "$stage/previous" "$BASE/lts-tool.previous" || return $?
+    staged=$(mktemp "${SELF}.XXXXXXXX") || return $?
+    install -m 700 "$stage/linux-server-tool.sh" "$staged" || return $?
+    mv -f -- "$staged" "$SELF" || return $?
+    staged=''
+    say '工具更新完成，长期公钥配置、SSH 授权和临时密钥记录均已保留。'
+    say "上一版工具备份：$BASE/lts-tool.previous"
+    say '执行 lts-tool 即可使用新版。'
+)
+update_menu() {
+    local c
+    while true; do
+        say "当前工具版本：$VERSION"
+        say $'\n更新工具：\n1) 一键更新到仓库最新版本\n2) 查看当前版本及更新来源\n0) 返回'
+        read -r -p '请选择：' c
+        case $c in
+            1) if bash "$SELF" --update; then
+                   exec bash "$SELF"
+               else say '更新未完成，当前版本仍可继续使用。'; fi;;
+            2) say "版本：$VERSION"; say '来源：https://github.com/gitttzr/lts-tool（main 分支）';;
+            0) return;; *) say '无效选择。';;
+        esac
+    done
 }
 init_key_config() (
     local parent=${KEY_CONFIG%/*} staged line probe count=0
@@ -663,6 +712,7 @@ ssh_menu() {
     done
 }
 main() {
+    if [[ ${1:-} == --version ]]; then say "lts-tool $VERSION"; return; fi
     root_check
     need flock
     exec 9>"$BASE/lock"
@@ -672,6 +722,7 @@ main() {
     install_self
     case ${1:-} in
         --install) say "lts-tool 安装/更新完成。长期公钥配置保留在 $KEY_CONFIG。执行 sudo lts-tool 打开菜单。"; return;;
+        --update) update_tool; return;;
         --confirm) confirm_change "${2:-}"; return;;
         --rollback) rollback; return;;
         --public-ssh) [[ ! -f $BASE/pending ]] || rollback; connection_mode public; return;;
@@ -681,18 +732,19 @@ main() {
         --temp-key-revoke) [[ -n ${2:-} ]] || die '请提供临时密钥编号。'; temp_key_revoke "$2"; return;;
         --temp-key-revoke-all) temp_key_revoke_all; return;;
         '') ;;
-        *) die '参数：--status | --public-ssh | --rollback | --confirm 确认码 | --temp-key-create | --temp-key-list | --temp-key-revoke 编号 | --temp-key-revoke-all';;
+        *) die '参数：--version | --update | --status | --public-ssh | --rollback | --confirm 确认码 | --temp-key-create | --temp-key-list | --temp-key-revoke 编号 | --temp-key-revoke-all';;
     esac
     flock -u 9
     local c
     while true; do
-        say $'\nLinux 服务器工具\n1) Tailscale 管理\n2) SSH 管理\n3) 临时维护密钥（root）\n0) 退出'
+        say $'\nLinux 服务器工具\n1) Tailscale 管理\n2) SSH 管理\n3) 临时维护密钥（root）\n4) 更新工具\n0) 退出'
         read -r -p '请选择：' c
         # Submenus run in a child, so errors return to the main menu.
         case $c in
             1) bash "$SELF" --internal-tailscale || say '操作中止。若已启动回退计时，计时仍会继续。';;
             2) bash "$SELF" --internal-ssh || say '操作中止。若已启动回退计时，计时仍会继续。';;
             3) bash "$SELF" --internal-temp-keys || say '临时密钥操作中止，请查看提示。';;
+            4) update_menu;;
             0) return;; *) say '无效选择。';;
         esac
     done

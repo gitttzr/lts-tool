@@ -1,6 +1,6 @@
 # Linux 服务器工具
 
-提供 Tailscale、SSH 和临时维护密钥三个主菜单，各有子菜单。脚本文件：`linux-server-tool.sh`。
+提供 Tailscale、SSH、临时维护密钥和更新工具四个主菜单，各有子菜单。脚本文件：`linux-server-tool.sh`。
 
 ## 使用
 
@@ -43,6 +43,12 @@ sudo nano /etc/lts-tool/root_authorized_keys
 第 1 项负责从 `/etc/lts-tool/root_authorized_keys` 导入 root 公钥。第 2 项仅调整登录认证方式，不再导入公钥，也不修改已有公钥文件、AuthorizedKeysFile 路径或 PermitRootLogin 设置；请先确认已有公钥能够登录，再使用第 2 项。第 2 项仍保留三分钟未确认自动回退机制。
 
 **临时维护密钥（root）：**一键生成并添加临时密钥、查看列表和私钥路径、撤销指定密钥、一键撤销全部临时密钥。
+
+**更新工具：**一键更新到仓库 main 分支最新版本、查看当前版本和更新来源。更新成功会自动重新打开新版主菜单。
+
+也可直接运行 `sudo lts-tool --update`，或用 `lts-tool --version` 查看版本。更新先下载文件，验证 SHA-256 及 Bash 语法，再原子替换工具；下载或校验失败保留当前版本。相同内容不重复安装。更新保留 `/etc/lts-tool/root_authorized_keys`、已有 SSH 授权和临时密钥记录，不修改 SSH/Tailscale 设置。存在待确认的 SSH 修改时，请先确认或回退后再更新。
+
+菜单更新会在 `/var/lib/linux-server-tool/lts-tool.previous` 保留上一版程序，可在控制台用 `sudo install -m 700 /var/lib/linux-server-tool/lts-tool.previous /usr/local/sbin/lts-tool` 恢复。直接重新运行安装器也能更新，但不会额外生成这份上一版备份。
 
 启用密码登录不会设置或重置 root 密码，也不会解锁账户。账户锁定、PAM、AllowUsers/AllowGroups 等原有约束仍可能阻止登录，必须实际验证新连接。
 
