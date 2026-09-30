@@ -6,7 +6,7 @@ set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 umask 077
-VERSION=1.0.6
+VERSION=1.0.7
 BASE=/var/lib/linux-server-tool
 SELF=/usr/local/sbin/lts-tool
 KEY_CONFIG=/etc/lts-tool/root_authorized_keys
@@ -117,9 +117,23 @@ AccuracySec=5s
 [Install]
 WantedBy=timers.target
 EOF
-    systemctl daemon-reload
-    systemctl enable --now lts-tool-health.timer
-    say 'Health monitor enabled: 3 failures, 600-second restart cooldown. SSH access policy unchanged.'
+    systemctl daemon-reload || return $?
+    systemctl enable --now lts-tool-health.timer || return $?
+    printf '%s\n' "$VERSION" > "$BASE/health-default-version"
+    say '健康守护已启用：连续失败 3 次后重启，重启冷却时间 10 分钟。SSH 连接策略保持不变。'
+}
+health_default_enable() {
+    if [[ ${1:-} != force && -f $BASE/health-default-version ]] &&
+        [[ $(cat "$BASE/health-default-version") == "$VERSION" ]]; then
+        return 0
+    fi
+    say '正在启用本版本默认健康守护……'
+    health_enable
+}
+activate_updated_tool() {
+    # Source the verified new version in a child while retaining our existing lock.
+    # Running main again here would wait for the lock held by this process.
+    bash -c 'set -Eeuo pipefail; source "$1"; health_default_enable force' _ "$SELF"
 }
 health_disable() {
     systemctl disable --now lts-tool-health.timer
@@ -129,7 +143,8 @@ health_disable() {
         rm -f -- "/etc/systemd/system/$unit.d/91-lts-health.conf"
     done
     systemctl daemon-reload
-    say 'Health monitor disabled. SSH access policy unchanged.'
+    printf '%s\n' "$VERSION" > "$BASE/health-default-version"
+    say '健康守护已关闭。SSH 连接策略保持不变；下次安装或升级将默认重新启用。'
 }
 health_status() {
     systemctl status lts-tool-health.timer --no-pager || true
@@ -138,11 +153,11 @@ health_status() {
 health_menu() {
     local c
     while true; do
-        say $'\nHealth monitor:\n1) Enable\n2) Disable\n3) Status / logs\n0) Back'
-        read -r -p 'Select: ' c
+        say $'\n健康守护：\n1) 启用健康守护\n2) 关闭健康守护\n3) 查看状态和日志\n0) 返回'
+        read -r -p '请选择：' c
         case $c in
-            1) bash "$SELF" --health-enable || say 'Enable failed.';;
-            2) bash "$SELF" --health-disable || say 'Disable failed.';;
+            1) bash "$SELF" --health-enable || say '启用失败，请查看上方错误。';;
+            2) bash "$SELF" --health-disable || say '关闭失败，请查看上方错误。';;
             3) health_status;; 0) return;;
         esac
     done
@@ -203,6 +218,7 @@ update_tool() (
     printf '%s  %s\n' "$expected" "$stage/linux-server-tool.sh" | sha256sum --check --status || die '下载校验失败，保留当前版本；请稍后重试。'
     bash -n "$stage/linux-server-tool.sh" || die '新版语法检查失败，保留当前版本。'
     if cmp -s "$SELF" "$stage/linux-server-tool.sh"; then
+        activate_updated_tool || { say '程序已是最新版，但健康守护启用失败，请在菜单第 5 项重试。'; return 1; }
         say '已经是仓库最新版本，无需更新。'
         return 0
     fi
@@ -215,6 +231,7 @@ update_tool() (
     install -m 700 "$stage/linux-server-tool.sh" "$staged" || return $?
     mv -f -- "$staged" "$SELF" || return $?
     staged=''
+    activate_updated_tool || { say '新版程序已安装，但健康守护启用失败，请在菜单第 5 项重试。'; return 1; }
     say '工具更新完成，长期公钥配置、SSH 授权和临时密钥记录均已保留。'
     say "上一版工具备份：$BASE/lts-tool.previous"
     say '执行 lts-tool 即可使用新版。'
@@ -987,7 +1004,7 @@ main() {
     init_key_config
     install_self
     case ${1:-} in
-        --install) say "lts-tool 安装/更新完成。长期公钥配置保留在 $KEY_CONFIG。执行 sudo lts-tool 打开菜单。"; return;;
+        --install) health_default_enable force; say "lts-tool 安装/更新完成，健康守护已默认启用。长期公钥配置保留在 $KEY_CONFIG。执行 sudo lts-tool 打开菜单。"; return;;
         --update) update_tool; return;;
         --health-enable) health_enable; return;;
         --health-disable) health_disable; return;;
@@ -1002,13 +1019,13 @@ main() {
         --temp-key-list) temp_key_list; return;;
         --temp-key-revoke) [[ -n ${2:-} ]] || die '请提供临时密钥编号。'; temp_key_revoke "$2"; return;;
         --temp-key-revoke-all) temp_key_revoke_all; return;;
-        '') ;;
+        '') health_default_enable;;
         *) die '参数：--version | --update | --health-enable | --health-disable | --health-status | --status | --tailscale-connect | --tailscale-reauth | --rescue-ssh | --public-ssh | --rollback | --confirm 确认码 | --temp-key-create | --temp-key-list | --temp-key-revoke 编号 | --temp-key-revoke-all';;
     esac
     flock -u 9
     local c
     while true; do
-        say $'\nLinux 服务器工具\n1) Tailscale 管理\n2) SSH 管理\n3) 临时维护密钥（root）\n4) 更新工具\n5) Health monitor / 健康守护\n0) 退出'
+        say $'\nLinux 服务器工具\n1) Tailscale 管理\n2) SSH 管理\n3) 临时维护密钥（root）\n4) 更新工具\n5) 健康守护\n0) 退出'
         read -r -p '请选择：' c
         # Submenus run in a child, so errors return to the main menu.
         case $c in

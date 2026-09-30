@@ -173,6 +173,7 @@ say 'PASS: hostname survives login profile reset, blank keeps name, failed login
 
 (
     BASE=$work/update-state
+    activate_updated_tool() { echo activated >> "$work/update-activated"; }
     SELF=$work/update-bin/lts-tool
     KEY_CONFIG=$work/update-config/root_authorized_keys
     mkdir -p "$BASE/temporary-keys/example" "${SELF%/*}" "${KEY_CONFIG%/*}" "$work/update-download"
@@ -207,6 +208,7 @@ say 'PASS: hostname survives login profile reset, blank keeps name, failed login
     cmp "$KEY_CONFIG" "$work/permanent.pub"
     grep -qx keep-temporary-key "$BASE/temporary-keys/example/record"
     update_tool > "$work/update-current-output"
+    [[ $(wc -l < "$work/update-activated") == 2 ]]
     grep -q '已经是仓库最新版本' "$work/update-current-output"
     cmp "$BASE/lts-tool.previous" "$work/update-old"
     printf '%064d  linux-server-tool.sh\n' 0 > "$work/update-download/checksum"

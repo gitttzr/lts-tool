@@ -68,3 +68,40 @@ health_check
     if health_probe_ssh; then exit 1; else [[ $? == 2 ]]; fi
 )
 echo 'PASS: health thresholds, cooldown across inactive state, deliberate stops, healthy/reset/unknown states, pending skip, local probes and timeouts'
+(
+    BASE=$work/default-state
+    mkdir -p "$BASE"
+    health_enable() {
+        echo enabled >> "$work/default-events"
+        printf '%s\n' "$VERSION" > "$BASE/health-default-version"
+    }
+    health_default_enable
+    health_default_enable
+    [[ $(wc -l < "$work/default-events") == 1 ]]
+    # A same-version manual disable marker is respected by normal menu startup.
+    printf '%s\n' "$VERSION" > "$BASE/health-default-version"
+    health_default_enable
+    [[ $(wc -l < "$work/default-events") == 1 ]]
+    health_default_enable force
+    [[ $(wc -l < "$work/default-events") == 2 ]]
+    echo older-version > "$BASE/health-default-version"
+    health_default_enable
+    [[ $(wc -l < "$work/default-events") == 3 ]]
+    echo older-version > "$BASE/health-default-version"
+    health_enable() { return 1; }
+    if health_default_enable; then exit 1; fi
+    grep -qx older-version "$BASE/health-default-version"
+)
+(
+    SELF=$work/new-version
+    export TEST_ACTIVATION_LOG=$work/new-version-activation
+    cat > "$SELF" <<'EOF'
+health_default_enable() {
+    [[ $1 == force ]] || return 1
+    echo new-version-enabled > "$TEST_ACTIVATION_LOG"
+}
+EOF
+    activate_updated_tool
+    grep -qx new-version-enabled "$TEST_ACTIVATION_LOG"
+)
+echo 'PASS: initial/default activation, version migration, same-version disabled state, forced reactivation, failed activation retry and new-version hook'
