@@ -107,10 +107,20 @@ SSH 修改前自动备份，启用 180 秒回退计时器。请保留当前连�
 进入云厂商 VNC/串口控制台，以 root 执行：
 
 ```bash
-/usr/local/sbin/lts-tool --public-ssh
+/usr/local/sbin/lts-tool --rescue-ssh
 ```
 
-此命令不依赖 Tailscale 在线。它保留现有 SSH 端口和认证方式，将 SSH 恢复为监听公网及私网地址。之后仍须在三分钟内新建 SSH 连接并执行确认命令；不确认会恢复此前模式。
+此命令从 1.0.3 起可用，不依赖 Tailscale 在线。它先修复 `/run/sshd`，取消待确认修改的回退计时并保留其备份，直接将 SSH 恢复为监听公网及私网地址，不先恢复旧私网配置。端口、密钥和认证方式保留。**紧急恢复不会在三分钟后自动切回私网，也不需要确认码。** 之后可以用正常菜单重新选择仅私网，并完成新连接确认。
+
+旧版工具如果无法更新、或有待确认配置阻止安装，可以在 VNC 中下载新版直接救援，然后安装新版：
+
+```bash
+curl -fL https://raw.githubusercontent.com/gitttzr/lts-tool/main/linux-server-tool.sh -o /root/lts-rescue.sh
+bash /root/lts-rescue.sh --rescue-ssh
+bash /root/lts-rescue.sh --install
+```
+
+请在上一条命令成功后再执行下一条。如果只能使用已安装旧版，可先执行 `install -d -m 0755 -o root -g root /run/sshd` 再恢复公网。旧版 `--public-ssh` 和普通菜单的公网切换仍有三分钟确认要求，勿与新版 `--rescue-ssh` 混淆。
 
 公网连接还要求云安全组、本机防火墙放行当前 SSH 端口。切换为“私网+公网”不会启用密码登录，也不会修改防火墙。
 
@@ -127,7 +137,7 @@ sudo lts-tool --rollback
 - Tailscale 使用官方 HTTPS 安装器，选择稳定源；不锁定版本。服务开机自启，退出后 5 秒重启，不设置重启次数上限。主动执行 `systemctl stop` 不会触发重启；网络断开、登录授权失效、进程假死也不等同于进程退出。
 - 安装后提示设置的是 **Tailscale 节点名称**，不会修改 Linux 系统 hostname。首次使用必须完成 Tailscale 登录授权。填写的名称会随注册命令传入，并在授权完成后再次应用，成功后才显示修改完成；留空不会主动覆盖名称。已有节点若配置了出口节点、路由等额外非默认选项，`tailscale up` 可能要求补齐这些选项；脚本不会使用 `--reset` 清除它们。
 - 默认关闭 Tailscale DNS 接管和 Tailscale SSH，使用系统 OpenSSH。DNS 接管关闭意味着此服务器不能仅依靠 Tailscale 自动配置来解析 MagicDNS 名称，可使用 Tailscale IP。
-- 私网模式让 OpenSSH 仅监听当前 Tailscale IPv4/IPv6 地址，适用于所有 SSH 用户，不影响其他服务。SSH 服务异常退出后重试启动，覆盖开机时 Tailscale 地址尚未就绪的情况。重新注册节点导致 Tailscale IP 改变时，需从控制台重新选择私网模式。
+- 私网模式让 OpenSSH 仅监听当前 Tailscale IPv4/IPv6 地址，适用于所有 SSH 用户，不影响其他服务。从 1.0.3 起，SSH 服务策略清除默认退出码 255 禁止重试设置，并管理 `/run/sshd`；切换模式或执行紧急恢复会应用修复后的策略。只更新工具本身不会自动重启 SSH。重新注册节点导致 Tailscale IP 改变时，需从控制台重新选择私网模式。
 - 会把 SSH 的 systemd socket 激活切换为普通服务启动，确保端口及监听地址以 sshd_config 为准。回退会恢复原 socket 的启用/运行状态。脚本添加的 SSH 自启状态不会撤销。
 - 检测全部 `100.*` IPv4 DNS，真正的 Tailscale 地址冲突范围为 `100.64.0.0/10`。Tailscale 已运行时，`100.100.100.100` 会作为可能的 MagicDNS 提示，不自动判为云厂商 DNS 冲突。
 - DNS 持久化支持 NetworkManager 和 systemd-resolved。其他网络管理方案会停止自动修改，避免仅修改 resolv.conf 后被 DHCP 覆盖。systemd-resolved 使用全局 `~.` 路由域；更具体的已有分流域仍可能走原 DNS。依赖云内部域名时需要专门配置分流。
@@ -149,6 +159,8 @@ bash test-linux-server-tool.sh
 ```
 
 当前编写环境为 Windows，未在真实 Linux VPS 上完成安装、重启、SSH 登录和计时回退的集成测试。首次使用请保留 VNC 通道。
+
+CI 另外在 Ubuntu 22.04/24.04 隔离容器中重现 `/run/sshd` 缺失，并用真实 OpenSSH 验证修复后的配置检查、受限地址登录及恢复所有地址后的登录。容器测试不覆盖真实 VPS 重启、systemd 调度和实际 Tailscale 网络，无法代替这些环境中的验证。
 
 ## 官方参考
 

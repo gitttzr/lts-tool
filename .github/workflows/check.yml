@@ -15,3 +15,18 @@ jobs:
         run: sha256sum --check linux-server-tool.sh.sha256
       - name: Run isolated regression tests
         run: bash test-linux-server-tool.sh
+  sshd-integration:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: ['ubuntu:22.04', 'ubuntu:24.04']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test real OpenSSH recovery in disposable container
+        run: |
+          docker run --rm -e LTS_SSHD_TEST_CONTAINER=1 -v "$PWD:/repo:ro" "${{ matrix.image }}" bash -c '
+            set -e
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server openssh-client iproute2
+            bash /repo/test-sshd-container.sh
+          '

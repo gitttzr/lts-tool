@@ -6,7 +6,7 @@ set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 umask 077
-VERSION=1.0.2
+VERSION=1.0.3
 BASE=/var/lib/linux-server-tool
 SELF=/usr/local/sbin/lts-tool
 KEY_CONFIG=/etc/lts-tool/root_authorized_keys
@@ -28,6 +28,15 @@ ssh_unit() {
     if unit_exists ssh.service; then echo ssh.service
     elif unit_exists sshd.service; then echo sshd.service
     else die '未找到 OpenSSH 服务，请先安装 openssh-server。'; fi
+}
+ensure_sshd_runtime() {
+    # /run is volatile, and stopping ssh.service may remove RuntimeDirectory.
+    [[ ! -L /run/sshd ]] || die '/run/sshd must not be a symbolic link.'
+    install -d -m 0755 -o root -g root /run/sshd
+}
+validate_sshd() {
+    ensure_sshd_runtime
+    sshd -t
 }
 install_self() {
     local src
@@ -127,7 +136,7 @@ no_pending() { [[ ! -f $BASE/pending ]] || die "存在待确认修改。请先�
 run_action() (
     exec 9>"$BASE/lock"
     flock -n 9 || die '另一个操作正在执行。'
-    case $1 in rollback|status|temp_key_list|temp_key_revoke|temp_key_revoke_all) ;; *) no_pending;; esac
+    case $1 in rollback|status|rescue_public_ssh|temp_key_list|temp_key_revoke|temp_key_revoke_all) ;; *) no_pending;; esac
     "$@"
 )
 
@@ -136,7 +145,7 @@ begin_change() {
     no_pending
     SSH_UNIT=$(ssh_unit)
     need sshd; need systemd-run
-    sshd -t
+    validate_sshd
     TX=$(date +%s)-$RANDOM
     BACKUP=$BASE/backup-$TX
     install -d "$BACKUP/files"
@@ -155,6 +164,10 @@ begin_change() {
         systemctl is-active "$f" > "$BACKUP/$f.active" 2>/dev/null || true
     done
     printf '%s\n' "${SSH_CONNECTION:-console}" > "$BACKUP/origin"
+    if [[ ${1:-normal} == rescue ]]; then
+        say "Recovery backup: $BACKUP (no automatic rollback)."
+        return 0
+    fi
     cat > "$BASE/rollback.service" <<EOF
 [Unit]
 Description=Rollback unconfirmed SSH toolbox change
@@ -189,12 +202,14 @@ rollback() {
     else
         rm -f "/etc/systemd/system/$unit.d/90-linux-server-tool.conf"
     fi
-    sshd -t
+    validate_sshd
     systemctl daemon-reload
     for socket in ssh.socket sshd.socket; do
         if grep -qx enabled "$dir/$socket.enabled"; then systemctl enable "$socket"; fi
         if grep -qx active "$dir/$socket.active"; then systemctl start "$socket"; fi
     done
+    ensure_sshd_runtime
+    systemctl reset-failed "$unit" || true
     systemctl restart "$unit"
     rm -f "$BASE/pending"
     systemctl disable --now linux-server-tool-rollback.timer || true
@@ -215,16 +230,24 @@ confirm_change() {
     say '新连接已确认，修改已保留。'
 }
 finish_change() {
-    sshd -t
+    validate_sshd
     # Disable socket activation so sshd_config controls listening addresses/ports.
     local socket
     for socket in ssh.socket sshd.socket; do
         if unit_exists "$socket"; then systemctl disable --now "$socket"; fi
     done
     keep_ssh_alive
+    ensure_sshd_runtime
+    systemctl reset-failed "$SSH_UNIT" || true
     systemctl enable "$SSH_UNIT"
     systemctl restart "$SSH_UNIT"
     systemctl is-active --quiet "$SSH_UNIT"
+    if [[ ${1:-normal} == rescue ]]; then
+        say 'Public SSH listening restored. No automatic rollback is scheduled.'
+        say 'SSH port and authentication policy are unchanged. Check firewall/security-group access.'
+        sshd -T | awk '$1 ~ /^(port|listenaddress)$/ {print}'
+        return 0
+    fi
     say '请保留当前会话，新开 SSH 连接测试，并在新连接中执行：'
     say "  $SELF --confirm $TX"
     say "立即回退：$SELF --rollback"
@@ -274,11 +297,8 @@ remove_directive() {
         sed -i -E "/^[[:space:]]*${key}[[:space:]]/Id" "$f"
     done < <(ssh_files)
 }
-keep_ssh_alive() {
-    local unit
-    unit=$(ssh_unit)
-    install -d "/etc/systemd/system/$unit.d"
-    cat > "/etc/systemd/system/$unit.d/90-linux-server-tool.conf" <<'EOF'
+ssh_service_override() {
+    cat <<'EOF'
 [Unit]
 StartLimitIntervalSec=0
 Wants=tailscaled.service
@@ -286,7 +306,18 @@ After=tailscaled.service
 [Service]
 Restart=on-failure
 RestartSec=5s
+# Debian/Ubuntu can otherwise suppress retries for bind failure (exit 255).
+RestartPreventExitStatus=
+RuntimeDirectory=sshd
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=restart
 EOF
+}
+keep_ssh_alive() {
+    local unit
+    unit=$(ssh_unit)
+    install -d "/etc/systemd/system/$unit.d"
+    ssh_service_override > "/etc/systemd/system/$unit.d/90-linux-server-tool.conf"
     systemctl daemon-reload
 }
 connection_mode() {
@@ -306,11 +337,22 @@ connection_mode() {
         [[ ! -s /proc/net/if_inet6 ]] || addresses+=$'\nListenAddress ::'
         say 'SSH 将监听公网及私网地址；云安全组和已有防火墙仍需允许 SSH 端口。'
     fi
-    begin_change
+    begin_change "${2:-normal}"
     keep_ssh_alive
     remove_directive ListenAddress
     managed_set ListenAddress "$addresses"
-    finish_change
+    finish_change "${2:-normal}"
+}
+rescue_public_ssh() {
+    # Explicit emergency action: never restore a broken private listener first.
+    # Retain all previous snapshots, but cancel the pending timeout rollback.
+    simple_config_check
+    validate_sshd
+    systemctl disable --now linux-server-tool-rollback.timer || true
+    if [[ -f $BASE/pending ]]; then
+        mv -- "$BASE/pending" "$BASE/cancelled-pending-$(date +%s)-$RANDOM"
+    fi
+    connection_mode public rescue
 }
 install_keys() {
     local line tmp count=0 root_home
@@ -380,7 +422,7 @@ temp_key_paths() {
 temp_key_preflight() {
     need ssh-keygen; need sshd
     simple_config_check
-    sshd -t
+    validate_sshd
     local effective methods
     effective=$(sshd -T)
     grep -qx 'pubkeyauthentication yes' <<< "$effective" || die '请先在 SSH 菜单启用公钥登录。'
@@ -679,6 +721,7 @@ tailscale_install() {
 }
 status() {
     say '=== SSH ==='
+    ensure_sshd_runtime
     sshd -T 2>/dev/null | awk '$1 ~ /^(port|listenaddress|permitrootlogin|passwordauthentication|authenticationmethods)$/ {print}' || true
     ss -ltnp || true
     say '=== Tailscale ==='
@@ -717,6 +760,8 @@ main() {
     need flock
     exec 9>"$BASE/lock"
     flock 9
+    # Recovery must work even when an older pending change blocks installation.
+    if [[ ${1:-} == --rescue-ssh ]]; then rescue_public_ssh; return; fi
     # Do not hold the lock while an interactive menu waits for input.
     init_key_config
     install_self
@@ -732,7 +777,7 @@ main() {
         --temp-key-revoke) [[ -n ${2:-} ]] || die '请提供临时密钥编号。'; temp_key_revoke "$2"; return;;
         --temp-key-revoke-all) temp_key_revoke_all; return;;
         '') ;;
-        *) die '参数：--version | --update | --status | --public-ssh | --rollback | --confirm 确认码 | --temp-key-create | --temp-key-list | --temp-key-revoke 编号 | --temp-key-revoke-all';;
+        *) die '参数：--version | --update | --status | --rescue-ssh | --public-ssh | --rollback | --confirm 确认码 | --temp-key-create | --temp-key-list | --temp-key-revoke 编号 | --temp-key-revoke-all';;
     esac
     flock -u 9
     local c

@@ -223,3 +223,26 @@ say 'PASS: hostname survives login profile reset, blank keeps name, failed login
     [[ -z $(find "$BASE" -maxdepth 1 -name 'update.*' -print) ]]
 )
 say 'PASS: update replacement and backup, config/key preservation, no-op update, checksum/download/syntax failure and pending SSH protection'
+
+(
+    ensure_sshd_runtime() { echo runtime >> "$work/sshd-validation-order"; }
+    sshd() { echo "sshd $*" >> "$work/sshd-validation-order"; }
+    validate_sshd
+    [[ $(cat "$work/sshd-validation-order") == $'runtime\nsshd -t' ]]
+    ssh_service_override > "$work/ssh-override"
+    grep -qx 'RestartPreventExitStatus=' "$work/ssh-override"
+    grep -qx 'RuntimeDirectory=sshd' "$work/ssh-override"
+    grep -qx 'RuntimeDirectoryPreserve=restart' "$work/ssh-override"
+    BASE=$work/recovery
+    mkdir -p "$BASE"
+    echo old-token > "$BASE/pending"
+    simple_config_check() { :; }
+    systemctl() { echo "$*" >> "$work/recovery-systemctl"; }
+    connection_mode() { [[ ! -f $BASE/pending ]]; echo "$*" > "$work/recovery-mode"; }
+    rollback() { echo 'Must not restore old private config' >&2; exit 1; }
+    rescue_public_ssh
+    [[ $(cat "$work/recovery-mode") == 'public rescue' ]]
+    [[ $(cat "$BASE"/cancelled-pending-*) == old-token ]]
+    grep -qx 'disable --now linux-server-tool-rollback.timer' "$work/recovery-systemctl"
+)
+say 'PASS: runtime directory before validation, exit-255 retry override, rescue cancels rollback without restoring private listener'
