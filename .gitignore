@@ -1,0 +1,6 @@
+root_authorized_keys
+*.pem
+id_ed25519*
+id_rsa*
+*.bak
+*.log
