@@ -4,7 +4,7 @@ set -Eeuo pipefail
 [[ -f /.dockerenv && ${LTS_SSHD_TEST_CONTAINER:-} == 1 ]] || exit 1
 cd /repo
 source ./linux-server-tool.sh
-work=$(mktemp -d)
+work=$(mktemp -d /root/lts-sshd-test.XXXXXXXX)
 pid=''
 trap '[[ -z $pid ]] || kill "$pid" 2>/dev/null || true; rm -rf "$work"' EXIT
 ssh-keygen -A

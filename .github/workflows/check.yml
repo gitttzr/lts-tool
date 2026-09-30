@@ -18,6 +18,7 @@ jobs:
   sshd-integration:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         image: ['ubuntu:22.04', 'ubuntu:24.04']
     steps:
@@ -27,6 +28,6 @@ jobs:
           docker run --rm -e LTS_SSHD_TEST_CONTAINER=1 -v "$PWD:/repo:ro" "${{ matrix.image }}" bash -c '
             set -e
             apt-get update -qq
-            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server openssh-client iproute2
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends openssh-server openssh-client iproute2
             bash /repo/test-sshd-container.sh
           '
