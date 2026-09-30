@@ -52,4 +52,14 @@ connection_mode public rescue
 grep -qx 'ListenAddress 0.0.0.0' /etc/ssh/sshd_config
 ! grep -q 'ListenAddress 127.0.0.2' /etc/ssh/sshd_config
 start_sshd 127.0.0.1
+health_probe_ssh
+kill -STOP "$pid"
+if health_probe_ssh; then
+    kill -CONT "$pid"
+    echo 'Expected health probe failure for a suspended sshd' >&2
+    exit 1
+fi
+kill -CONT "$pid"
+health_probe_ssh
+echo 'PASS: real SSH key exchange detects suspended listener and succeeds after resume'
 echo 'PASS: real sshd missing-runtime recovery, private-address login and public-address recovery login'

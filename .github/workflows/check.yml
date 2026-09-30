@@ -10,11 +10,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check Bash syntax
-        run: bash -n linux-server-tool.sh install.sh test-linux-server-tool.sh
+        run: bash -n linux-server-tool.sh install.sh test-linux-server-tool.sh test-health.sh
       - name: Verify download checksum
         run: sha256sum --check linux-server-tool.sh.sha256
       - name: Run isolated regression tests
-        run: bash test-linux-server-tool.sh
+        run: |
+          bash test-linux-server-tool.sh
+          bash test-health.sh
   sshd-integration:
     runs-on: ubuntu-latest
     strategy:

@@ -1,6 +1,6 @@
 # Linux 服务器工具
 
-提供 Tailscale、SSH、临时维护密钥和更新工具四个主菜单，各有子菜单。脚本文件：`linux-server-tool.sh`。
+提供 Tailscale、SSH、临时维护密钥、更新工具和健康守护五个主菜单，各有子菜单。脚本文件：`linux-server-tool.sh`。
 
 ## 使用
 
@@ -55,6 +55,23 @@ Tailscale 菜单第 9 项分为「正常登录/恢复连接」和「强制重新
 菜单更新会在 `/var/lib/linux-server-tool/lts-tool.previous` 保留上一版程序，可在控制台用 `sudo install -m 700 /var/lib/linux-server-tool/lts-tool.previous /usr/local/sbin/lts-tool` 恢复。直接重新运行安装器也能更新，但不会额外生成这份上一版备份。
 
 启用密码登录不会设置或重置 root 密码，也不会解锁账户。账户锁定、PAM、AllowUsers/AllowGroups 等原有约束仍可能阻止登录，必须实际验证新连接。
+
+## 健康守护（1.0.6）
+
+升级不会自动启用新服务。主菜单 **5 → 1** 启用，或以 root 执行：
+
+```bash
+lts-tool --health-enable
+lts-tool --health-status
+```
+
+健康守护菜单和运行日志使用英文，便于 VNC 显示。启用会创建开机启动的 `lts-tool-health.timer`；每轮检查结束约 60 秒后再次检查，启动前 180 秒跳过。Tailscale 通过有超时的本地 `status --json` 检查响应，`Stopped`、`NeedsLogin` 等有响应状态不会触发重启。SSH 根据生效监听地址和端口执行本地 `ssh-keyscan` 密钥交换，单项最长约 10 秒（含强制结束等待），无需任何登录私钥。
+
+每个服务连续三次探测失败才请求重启，每个服务两次重启请求至少间隔 600 秒。健康检查与工具操作共用非阻塞锁，忙碌或存在待确认的 SSH 修改时跳过。服务非 active 时不主动启动，尊重手动停止；崩溃和启动失败由原有 systemd 重启策略处理。SSH 配置无法读取时只记录错误，不盲目重启。
+
+启用时仅增加服务停止超时（20 秒）及允许超时强制结束的独立配置，不立即重启 SSH/Tailscale，不改变监听地址、端口、公私网策略、公钥或登录状态。异常恢复会短暂影响对应连接。可执行 `lts-tool --health-disable` 停止守护并移除其独立服务配置，原有崩溃自动重启策略保留。日志：`journalctl -u lts-tool-health.service -n 50 --no-pager`。
+
+本地探测不能保证端到端网络可达，也不能修复系统整体卡死、密钥过期、认证问题或重新注册后的 IP 变更。健康守护绝不自动开放公网、不自动重新授权。无法恢复时仍需 VNC 救援。恢复旧于 1.0.6 的脚本前先关闭健康守护，避免旧脚本不识别检查参数。
 
 ## 临时授权 AI 维护
 

@@ -6,13 +6,147 @@ set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 umask 077
-VERSION=1.0.5
+VERSION=1.0.6
 BASE=/var/lib/linux-server-tool
 SELF=/usr/local/sbin/lts-tool
 KEY_CONFIG=/etc/lts-tool/root_authorized_keys
 CONF=/etc/ssh/sshd_config
 BEGIN='# BEGIN LINUX-SERVER-TOOL'
 END='# END LINUX-SERVER-TOOL'
+HEALTH_STATE=/run/lts-tool-health
+
+# Local liveness probes only: no external host or control-plane reachability test.
+health_probe_tailscale() {
+    local output
+    output=$(timeout --kill-after=2s 8s tailscale status --json 2>/dev/null) || return 1
+    # NeedsLogin/Stopped are responsive states, not reasons to restart.
+    [[ $output =~ \"BackendState\"[[:space:]]*:[[:space:]]*\"[^\"]+\" ]]
+}
+health_probe_ssh() {
+    local config endpoint host port count=0
+    config=$(timeout --kill-after=2s 8s /usr/sbin/sshd -T 2>/dev/null) || return 2
+    while read -r endpoint; do
+        [[ -n $endpoint ]] || continue
+        ((count+=1))
+        ((count <= 16)) || return 2
+        port=${endpoint##*:}; host=${endpoint%:*}
+        host=${host#\[}; host=${host%\]}
+        case $host in 0.0.0.0) host=127.0.0.1;; ::) host=::1;; esac
+        [[ -n $host && $port =~ ^[0-9]+$ ]] || return 2
+        # A key exchange, not merely an open TCP port. No login/private key used.
+        timeout --kill-after=2s 8s ssh-keyscan -T 5 -p "$port" "$host" >/dev/null 2>&1 || return 1
+    done < <(printf '%s\n' "$config" | awk '$1 == "listenaddress" {print $2}')
+    ((count > 0)) || return 2
+}
+health_check_unit() {
+    local unit=$1 probe=$2 now=$3 count=0 last=0 rc state
+    # Respect deliberate stops; service crash/start retries remain systemd's job.
+    state=$(systemctl show "$unit" -p ActiveState --value) || return 0
+    if [[ -f $HEALTH_STATE/$unit.state ]]; then
+        read -r count last < "$HEALTH_STATE/$unit.state" || true
+        [[ $count =~ ^[0-9]{1,3}$ && $last =~ ^[0-9]{1,12}$ ]] || { count=0; last=0; }
+    fi
+    if [[ $state != active ]]; then
+        printf '0 %s\n' "$last" > "$HEALTH_STATE/$unit.state"
+        return 0
+    fi
+    if "$probe"; then rc=0; else rc=$?; fi
+    if ((rc == 0)); then
+        count=0
+    elif ((rc == 2)); then
+        count=0
+        say "Health: $unit probe unavailable (check configuration); no restart."
+    else
+        ((count+=1))
+        ((count <= 3)) || count=3
+        say "Health: $unit local probe failed ($count/3)."
+        if ((count >= 3 && (last == 0 || now - last >= 600))); then
+            # Record before dispatch, so even a failed restart has a cooldown.
+            last=$now; count=0
+            printf '%s %s\n' "$count" "$last" > "$HEALTH_STATE/$unit.state"
+            say "Health: requesting restart of $unit; cooldown 600 seconds."
+            systemctl --no-block restart "$unit" || say "Health: restart request failed for $unit."
+        fi
+    fi
+    printf '%s %s\n' "$count" "$last" > "$HEALTH_STATE/$unit.state"
+}
+health_check() {
+    local uptime unit
+    # The caller holds the tool lock; skip any unconfirmed SSH transaction.
+    [[ ! -f $BASE/pending ]] || return 0
+    read -r uptime _ < /proc/uptime
+    uptime=${uptime%%.*}
+    ((uptime >= 180)) || return 0
+    install -d -m 700 "$HEALTH_STATE"
+    if command -v tailscale >/dev/null && unit_exists tailscaled.service; then
+        health_check_unit tailscaled.service health_probe_tailscale "$uptime"
+    fi
+    unit=$(ssh_unit) || return 0
+    health_check_unit "$unit" health_probe_ssh "$uptime"
+}
+health_enable() {
+    no_pending
+    need timeout; need ssh-keyscan
+    local unit ssh
+    ssh=$(ssh_unit)
+    for unit in "$ssh" tailscaled.service; do
+        unit_exists "$unit" || continue
+        install -d "/etc/systemd/system/$unit.d"
+        cat > "/etc/systemd/system/$unit.d/91-lts-health.conf" <<'EOF'
+[Service]
+TimeoutStopSec=20s
+SendSIGKILL=yes
+EOF
+    done
+    cat > /etc/systemd/system/lts-tool-health.service <<EOF
+[Unit]
+Description=Check local SSH and Tailscale responsiveness
+[Service]
+Type=oneshot
+ExecStart=/bin/bash $SELF --health-check
+TimeoutStartSec=180s
+UMask=0077
+EOF
+    cat > /etc/systemd/system/lts-tool-health.timer <<'EOF'
+[Unit]
+Description=Check local SSH and Tailscale every minute
+[Timer]
+OnBootSec=180s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now lts-tool-health.timer
+    say 'Health monitor enabled: 3 failures, 600-second restart cooldown. SSH access policy unchanged.'
+}
+health_disable() {
+    systemctl disable --now lts-tool-health.timer
+    systemctl stop lts-tool-health.service || true
+    local unit
+    for unit in ssh.service sshd.service tailscaled.service; do
+        rm -f -- "/etc/systemd/system/$unit.d/91-lts-health.conf"
+    done
+    systemctl daemon-reload
+    say 'Health monitor disabled. SSH access policy unchanged.'
+}
+health_status() {
+    systemctl status lts-tool-health.timer --no-pager || true
+    journalctl -u lts-tool-health.service -n 20 --no-pager || true
+}
+health_menu() {
+    local c
+    while true; do
+        say $'\nHealth monitor:\n1) Enable\n2) Disable\n3) Status / logs\n0) Back'
+        read -r -p 'Select: ' c
+        case $c in
+            1) bash "$SELF" --health-enable || say 'Enable failed.';;
+            2) bash "$SELF" --health-disable || say 'Disable failed.';;
+            3) health_status;; 0) return;;
+        esac
+    done
+}
 
 say() { printf '%s\n' "$*"; }
 die() { say "错误：$*" >&2; exit 1; }
@@ -841,6 +975,11 @@ main() {
     root_check
     need flock
     exec 9>"$BASE/lock"
+    if [[ ${1:-} == --health-check ]]; then
+        flock -n 9 || return 0
+        health_check
+        return
+    fi
     flock 9
     # Recovery must work even when an older pending change blocks installation.
     if [[ ${1:-} == --rescue-ssh ]]; then rescue_public_ssh; return; fi
@@ -850,6 +989,9 @@ main() {
     case ${1:-} in
         --install) say "lts-tool 安装/更新完成。长期公钥配置保留在 $KEY_CONFIG。执行 sudo lts-tool 打开菜单。"; return;;
         --update) update_tool; return;;
+        --health-enable) health_enable; return;;
+        --health-disable) health_disable; return;;
+        --health-status) health_status; return;;
         --tailscale-connect) no_pending; tailscale_auth connect; return;;
         --tailscale-reauth) no_pending; tailscale_auth reauth; return;;
         --confirm) confirm_change "${2:-}"; return;;
@@ -861,12 +1003,12 @@ main() {
         --temp-key-revoke) [[ -n ${2:-} ]] || die '请提供临时密钥编号。'; temp_key_revoke "$2"; return;;
         --temp-key-revoke-all) temp_key_revoke_all; return;;
         '') ;;
-        *) die '参数：--version | --update | --status | --tailscale-connect | --tailscale-reauth | --rescue-ssh | --public-ssh | --rollback | --confirm 确认码 | --temp-key-create | --temp-key-list | --temp-key-revoke 编号 | --temp-key-revoke-all';;
+        *) die '参数：--version | --update | --health-enable | --health-disable | --health-status | --status | --tailscale-connect | --tailscale-reauth | --rescue-ssh | --public-ssh | --rollback | --confirm 确认码 | --temp-key-create | --temp-key-list | --temp-key-revoke 编号 | --temp-key-revoke-all';;
     esac
     flock -u 9
     local c
     while true; do
-        say $'\nLinux 服务器工具\n1) Tailscale 管理\n2) SSH 管理\n3) 临时维护密钥（root）\n4) 更新工具\n0) 退出'
+        say $'\nLinux 服务器工具\n1) Tailscale 管理\n2) SSH 管理\n3) 临时维护密钥（root）\n4) 更新工具\n5) Health monitor / 健康守护\n0) 退出'
         read -r -p '请选择：' c
         # Submenus run in a child, so errors return to the main menu.
         case $c in
@@ -874,6 +1016,7 @@ main() {
             2) bash "$SELF" --internal-ssh || say '操作中止。若已启动回退计时，计时仍会继续。';;
             3) bash "$SELF" --internal-temp-keys || say '临时密钥操作中止，请查看提示。';;
             4) update_menu;;
+            5) health_menu;;
             0) return;; *) say '无效选择。';;
         esac
     done
