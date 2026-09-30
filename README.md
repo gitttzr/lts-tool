@@ -38,6 +38,10 @@ sudo nano /etc/lts-tool/root_authorized_keys
 
 **Tailscale：**官方安装/更新最新稳定版、DNS 检测与修改、SSH 私网/公网切换、修改 Tailscale 主机名、服务自启与自动重启、状态、登录授权。
 
+Tailscale 菜单第 9 项分为「正常登录/恢复连接」和「强制重新授权」。普通连接在已登录时不会产生新链接，但会明确显示完成状态；强制重新授权会重新请求浏览器授权，需要在 VNC 或已验证可用的公网 SSH 中执行，脚本会阻止检测到的 Tailscale SSH 会话发起此操作。
+
+也可执行 `sudo lts-tool --tailscale-connect` 或 `sudo lts-tool --tailscale-reauth`。每次尝试最多等待 180 秒，原始输出直接显示；如 Tailscale 要求补齐非默认参数，脚本会安全读取不含引号/空格的建议参数并重试一次，不使用 `--reset`。复杂参数格式不自动执行，失败时保留错误用于排查。SSH_CONNECTION 被清除或经代理转接时，连接类型检测不一定可靠，因此强制重新授权仍应优先使用 VNC。如果重新授权后 Tailscale IP 改变，需在 VNC 重新选择 SSH 仅私网模式。
+
 **SSH：**追加 root 公钥并允许密码登录、关闭所有用户密码及交互式登录、修改端口、私网/公网切换、状态、回退。
 
 第 1 项负责从 `/etc/lts-tool/root_authorized_keys` 导入 root 公钥。第 2 项仅调整登录认证方式，不再导入公钥，也不修改已有公钥文件、AuthorizedKeysFile 路径或 PermitRootLogin 设置；请先确认已有公钥能够登录，再使用第 2 项。第 2 项仍保留三分钟未确认自动回退机制。

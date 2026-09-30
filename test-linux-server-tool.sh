@@ -246,3 +246,53 @@ say 'PASS: update replacement and backup, config/key preservation, no-op update,
     grep -qx 'disable --now linux-server-tool-rollback.timer' "$work/recovery-systemctl"
 )
 say 'PASS: runtime directory before validation, exit-255 retry override, rescue cancels rollback without restoring private listener'
+
+(
+    BASE=$work/reauth
+    mkdir -p "$BASE"
+    SSH_CONNECTION=''
+    scenario=success
+    ask() { return 0; }
+    systemctl() { :; }
+    timeout() { shift 3; "$@"; }
+    tailscale() {
+        echo "$*" >> "$work/reauth-calls"
+        [[ $1 == up ]] || return 0
+        case $scenario in
+            success) return 0;;
+            timeout) return 124;;
+            flags)
+                if [[ $* == *--accept-dns=false* ]]; then return 0; fi
+                printf '%s\n' 'Error: non-default flags required' 'tailscale up --force-reauth --accept-dns=false --hostname=my-vps'
+                return 1;;
+        esac
+    }
+    tailscale_auth connect > "$work/connect-result"
+    grep -qx up "$work/reauth-calls"
+    grep -q '成功完成' "$work/connect-result"
+    : > "$work/reauth-calls"
+    scenario=flags
+    tailscale_auth reauth > /dev/null
+    grep -qx 'up --force-reauth' "$work/reauth-calls"
+    grep -qx 'up --force-reauth --accept-dns=false --hostname=my-vps' "$work/reauth-calls"
+    scenario=timeout
+    if tailscale_auth connect > "$work/auth-timeout"; then exit 1; fi
+    grep -q '124' "$work/auth-timeout"
+    ! grep -q '成功完成' "$work/auth-timeout"
+    SSH_CONNECTION='100.64.1.2 12345 100.100.1.3 22'
+    : > "$work/reauth-calls"
+    if tailscale_auth reauth > /dev/null; then exit 1; fi
+    [[ ! -s $work/reauth-calls ]]
+    tailscale_session_address fd7a:115c:a1e0::1
+    ! tailscale_session_address 100.63.1.1
+    ! tailscale_session_address 100.128.1.1
+    SSH_CONNECTION=''
+    ask() { return 1; }
+    tailscale_auth reauth > /dev/null
+    [[ ! -s $work/reauth-calls ]]
+    printf '%s\n' 'non-default flags' 'tailscale up --force-reauth --reset' > "$work/unsafe-flags"
+    if tailscale_suggested_flags "$work/unsafe-flags" reauth; then exit 1; fi
+    printf '%s\n' 'non-default flags' 'tailscale up --force-reauth --hostname=$(touch /tmp/unsafe)' > "$work/unsafe-flags"
+    if tailscale_suggested_flags "$work/unsafe-flags" reauth; then exit 1; fi
+)
+say 'PASS: explicit reauth, preserving suggested preferences without eval/reset, success/timeout output, private-SSH refusal and cancellation'

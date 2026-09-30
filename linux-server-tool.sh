@@ -6,7 +6,7 @@ set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 umask 077
-VERSION=1.0.3
+VERSION=1.0.4
 BASE=/var/lib/linux-server-tool
 SELF=/usr/local/sbin/lts-tool
 KEY_CONFIG=/etc/lts-tool/root_authorized_keys
@@ -729,6 +729,85 @@ status() {
     systemctl show tailscaled -p ActiveState -p Restart -p RestartUSec -p UnitFileState || true
     [[ ! -f $BASE/pending ]] || say "待确认：$(cat "$BASE/pending")"
 }
+tailscale_session_address() {
+    local addr=$1 second
+    case $addr in
+        fd7a:115c:a1e0:*) return 0;;
+        100.*) second=${addr#100.}; second=${second%%.*}
+            [[ $second =~ ^[0-9]{1,3}$ ]] && ((10#$second >= 64 && 10#$second <= 127));;
+        *) return 1;;
+    esac
+}
+tailscale_suggested_flags() {
+    local log=$1 mode=$2 line arg force=no
+    local -a parts
+    grep -q 'non-default flags' "$log" || return 1
+    line=$(sed -n -E '/^[[:space:]]*tailscale up --/ {p;q;}' "$log")
+    read -r -a parts <<< "$line"
+    [[ ${parts[0]:-} == tailscale && ${parts[1]:-} == up && ${#parts[@]} -gt 2 ]] || return 1
+    for arg in "${parts[@]:2}"; do
+        # Data-only argv parsing: no eval, shell expansion, quotes or commands.
+        [[ $arg =~ ^--[a-z0-9-]+(=[a-zA-Z0-9_.,:/%+@=-]+)?$ ]] || return 1
+        case $arg in --reset*|--auth-key*|--authkey*|--accept-risk*|--client-secret*) return 1;; esac
+        [[ $arg != --force-reauth ]] || force=yes
+    done
+    [[ $mode == reauth && $force == yes || $mode == connect && $force == no ]] || return 1
+    printf '%s\n' "${parts[@]:2}"
+}
+tailscale_auth() (
+    local mode=$1 log rc=0 retry client client_port server server_port flags
+    local -a args=()
+    need tailscale; need timeout
+    if [[ $mode == reauth ]]; then
+        if [[ -n ${SSH_CONNECTION:-} ]]; then
+            read -r client client_port server server_port <<< "$SSH_CONNECTION"
+            if tailscale_session_address "$client" || tailscale_session_address "$server"; then
+                say 'Re-authentication blocked: this SSH session may use Tailscale. Use VNC or public SSH.'
+                return 1
+            fi
+        fi
+        say '强制重新授权会中断 Tailscale 网络。请在 VNC 或已确认可用的公网 SSH 中操作。'
+        ask '现在发起强制重新授权？' || { say '已取消，未修改登录状态。'; return 0; }
+        args+=(--force-reauth)
+    fi
+    systemctl start tailscaled.service || return $?
+    log=$(mktemp "$BASE/tailscale-auth.XXXXXXXX") || return $?
+    trap 'rm -f -- "$log"' EXIT
+    say 'Starting Tailscale authentication/connection (timeout: 180 seconds).'
+    say '如需授权，下方会显示登录链接，请在浏览器中完成。'
+    for retry in 0 1; do
+        if timeout --foreground --kill-after=5s 180s tailscale up "${args[@]}" 2>&1 | tee "$log"; then
+            say 'Tailscale 连接/授权命令已成功完成；已登录时普通连接不会生成新链接。'
+            timeout --foreground --kill-after=5s 15s tailscale status || true
+            say '若仅私网 SSH 且重新授权后节点 IP 改变，请在 VNC 中重新选择 SSH 仅私网。'
+            return 0
+        else
+            rc=${PIPESTATUS[0]}
+        fi
+        if [[ $retry == 0 ]] && flags=$(tailscale_suggested_flags "$log" "$mode"); then
+            mapfile -t args <<< "$flags"
+            say '正在按 Tailscale 提示保留已有非默认配置并重试（不会使用 --reset）。'
+            continue
+        fi
+        break
+    done
+    say "Tailscale 操作未完成，退出码：$rc。"
+    [[ $rc != 124 && $rc != 137 ]] || say '等待授权/连接超时；请检查登录是否完成及服务器网络，稍后重试。'
+    say '上方保留了原始错误；排查命令：tailscale status；journalctl -u tailscaled -n 50 --no-pager'
+    return 1
+)
+tailscale_auth_menu() {
+    local c
+    while true; do
+        say $'\nTailscale 登录：\n1) 正常登录/恢复连接（已登录则保留）\n2) 强制重新授权（请使用 VNC 或公网 SSH）\n0) 返回'
+        read -r -p '请选择：' c
+        case $c in
+            1) if bash "$SELF" --tailscale-connect; then :; else say '连接未完成，请查看上方错误。'; fi;;
+            2) if bash "$SELF" --tailscale-reauth; then :; else say '重新授权未完成，请查看上方错误。'; fi;;
+            0) return;; *) say '无效选择。';;
+        esac
+    done
+}
 tailscale_menu() {
     local c
     while true; do
@@ -738,7 +817,7 @@ tailscale_menu() {
             1) run_action tailscale_install;; 2) run_action dns_check;; 3) run_action dns_menu;;
             4) run_action connection_mode private;; 5) run_action connection_mode public;;
             6) run_action rename_host;; 7) run_action tailscale_persist;; 8) run_action status;;
-            9) run_action tailscale up;; 0) return;; *) say '无效选择。';;
+            9) tailscale_auth_menu;; 0) return;; *) say '无效选择。';;
         esac
     done
 }
@@ -768,6 +847,8 @@ main() {
     case ${1:-} in
         --install) say "lts-tool 安装/更新完成。长期公钥配置保留在 $KEY_CONFIG。执行 sudo lts-tool 打开菜单。"; return;;
         --update) update_tool; return;;
+        --tailscale-connect) no_pending; tailscale_auth connect; return;;
+        --tailscale-reauth) no_pending; tailscale_auth reauth; return;;
         --confirm) confirm_change "${2:-}"; return;;
         --rollback) rollback; return;;
         --public-ssh) [[ ! -f $BASE/pending ]] || rollback; connection_mode public; return;;
@@ -777,7 +858,7 @@ main() {
         --temp-key-revoke) [[ -n ${2:-} ]] || die '请提供临时密钥编号。'; temp_key_revoke "$2"; return;;
         --temp-key-revoke-all) temp_key_revoke_all; return;;
         '') ;;
-        *) die '参数：--version | --update | --status | --rescue-ssh | --public-ssh | --rollback | --confirm 确认码 | --temp-key-create | --temp-key-list | --temp-key-revoke 编号 | --temp-key-revoke-all';;
+        *) die '参数：--version | --update | --status | --tailscale-connect | --tailscale-reauth | --rescue-ssh | --public-ssh | --rollback | --confirm 确认码 | --temp-key-create | --temp-key-list | --temp-key-revoke 编号 | --temp-key-revoke-all';;
     esac
     flock -u 9
     local c
