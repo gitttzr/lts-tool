@@ -575,13 +575,36 @@ EOF
     systemctl restart tailscaled.service
     systemctl is-active --quiet tailscaled.service
 }
-rename_host() {
+read_tailscale_hostname() {
     local name
     read -r -p 'Tailscale 主机名（留空保留）：' name
     [[ -n $name ]] || return 0
     [[ ${#name} -le 63 && $name =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$ ]] || die '主机名须为 1-63 位字母、数字、短横线，首尾不能是短横线。'
+    printf '%s' "$name"
+}
+rename_host() {
+    local name
+    name=$(read_tailscale_hostname)
+    [[ -n $name ]] || return 0
     tailscale set --hostname="$name"
     say "Tailscale 名称已设为 $name（Linux 系统 hostname 保持原值）。"
+}
+tailscale_install_login() {
+    local name
+    local -a flags=(--accept-dns=false --ssh=false)
+    name=$(read_tailscale_hostname) || return $?
+    [[ -z $name ]] || flags+=("--hostname=$name")
+    say '请打开接下来显示的链接完成授权；授权完成后会应用主机名。'
+    say '默认不接管服务器 DNS、不启用 Tailscale SSH；通过普通 OpenSSH 公钥登录。'
+    # Carry the chosen name into initial registration. A pre-login `set` can
+    # belong to a different/empty profile and be lost when authorization finishes.
+    tailscale up "${flags[@]}" || return $?
+    # Reapply to the now-authorized profile. Never announce success before this.
+    tailscale set --accept-dns=false --ssh=false || return $?
+    if [[ -n $name ]]; then
+        tailscale set --hostname="$name" || return $?
+        say "授权已完成，Tailscale 名称已设为 $name（Linux 系统 hostname 保持原值）。"
+    fi
 }
 tailscale_install() {
     dns_check
@@ -600,11 +623,8 @@ tailscale_install() {
     env -u TAILSCALE_VERSION sh "$installer"
     rm -f "$installer"
     tailscale_persist
-    say '安装成功；先设置清晰的 Tailscale 主机名，再完成登录授权。'
-    rename_host
-    say '默认不接管服务器 DNS、不启用 Tailscale SSH；通过普通 OpenSSH 公钥登录。'
-    tailscale set --accept-dns=false --ssh=false
-    tailscale up
+    say '安装成功；填写 Tailscale 主机名后完成登录授权。'
+    tailscale_install_login
     tailscale status
     say '可在子菜单 4/5 中切换 SSH 私网/公网监听方式。'
 }

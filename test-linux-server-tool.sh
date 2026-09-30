@@ -141,3 +141,32 @@ say 'PASS: disable-password action never imports keys, preserves key paths/root 
     ! grep -q '^ssh-' "$KEY_CONFIG"
 )
 say 'PASS: legacy public-key migration as data, existing configuration preserved, new configuration initialized'
+
+(
+    log=$work/tailscale-login.log
+    tailscale() {
+        printf '%s\n' "$*" >> "$log"
+        # Simulate profile reset during authorization: only a post-login set sticks.
+        if [[ $1 == up ]]; then echo default-vps > "$work/active-name"; fi
+        if [[ $1 == set && ${2:-} == --hostname=* ]]; then
+            printf '%s\n' "${2#--hostname=}" > "$work/active-name"
+        fi
+    }
+    tailscale_install_login <<< 'my-vps-01' > "$work/login-output"
+    [[ $(sed -n '1p' "$log") == 'up --accept-dns=false --ssh=false --hostname=my-vps-01' ]]
+    [[ $(tail -n 1 "$log") == 'set --hostname=my-vps-01' ]]
+    [[ $(cat "$work/active-name") == my-vps-01 ]]
+    grep -q '授权已完成' "$work/login-output"
+    : > "$log"
+    tailscale_install_login <<< '' > /dev/null
+    ! grep -q -- '--hostname' "$log"
+    tailscale() { printf '%s\n' "$*" >> "$log"; return 23; }
+    : > "$log"
+    if tailscale_install_login <<< 'my-vps-01' > "$work/failed-login-output"; then exit 1; fi
+    [[ $(wc -l < "$log") == 1 ]]
+    ! grep -q '授权已完成' "$work/failed-login-output"
+    : > "$log"
+    if (tailscale_install_login <<< '-invalid') > /dev/null 2>&1; then exit 1; fi
+    [[ ! -s $log ]]
+)
+say 'PASS: hostname survives login profile reset, blank keeps name, failed login never reports success, invalid name rejected'

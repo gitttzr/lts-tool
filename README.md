@@ -119,7 +119,7 @@ sudo lts-tool --rollback
 
 - 面向运行 systemd、OpenSSH 的常见 VPS Linux，优先考虑 Debian/Ubuntu；其他发行版需要相应依赖。缺少 curl 时支持 apt/dnf/yum 安装。要求 Bash、coreutils、iproute2、util-linux/flock 等基础工具。不支持 Alpine/OpenRC、非 systemd 容器。
 - Tailscale 使用官方 HTTPS 安装器，选择稳定源；不锁定版本。服务开机自启，退出后 5 秒重启，不设置重启次数上限。主动执行 `systemctl stop` 不会触发重启；网络断开、登录授权失效、进程假死也不等同于进程退出。
-- 安装后提示设置的是 **Tailscale 节点名称**，不会修改 Linux 系统 hostname。首次使用必须完成 Tailscale 登录授权。
+- 安装后提示设置的是 **Tailscale 节点名称**，不会修改 Linux 系统 hostname。首次使用必须完成 Tailscale 登录授权。填写的名称会随注册命令传入，并在授权完成后再次应用，成功后才显示修改完成；留空不会主动覆盖名称。已有节点若配置了出口节点、路由等额外非默认选项，`tailscale up` 可能要求补齐这些选项；脚本不会使用 `--reset` 清除它们。
 - 默认关闭 Tailscale DNS 接管和 Tailscale SSH，使用系统 OpenSSH。DNS 接管关闭意味着此服务器不能仅依靠 Tailscale 自动配置来解析 MagicDNS 名称，可使用 Tailscale IP。
 - 私网模式让 OpenSSH 仅监听当前 Tailscale IPv4/IPv6 地址，适用于所有 SSH 用户，不影响其他服务。SSH 服务异常退出后重试启动，覆盖开机时 Tailscale 地址尚未就绪的情况。重新注册节点导致 Tailscale IP 改变时，需从控制台重新选择私网模式。
 - 会把 SSH 的 systemd socket 激活切换为普通服务启动，确保端口及监听地址以 sshd_config 为准。回退会恢复原 socket 的启用/运行状态。脚本添加的 SSH 自启状态不会撤销。
