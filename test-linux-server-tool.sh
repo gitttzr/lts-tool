@@ -66,7 +66,8 @@ mapfile -t dirs < <(find "$TEMP_ROOT" -mindepth 1 -maxdepth 1 -type d | sort)
 first=${dirs[0]}; second=${dirs[1]}
 first_key=$(temp_key_file "$first"); second_key=$(temp_key_file "$second")
 [[ ${first_key##*/} != ${second_key##*/} ]]
-[[ ${first##*/} =~ ^key-[0-9]{8}T[0-9]{6}Z-[a-zA-Z0-9]{24}$ ]]
+[[ ${first##*/} =~ ^key-[a-zA-Z0-9]{8}$ ]]
+[[ ${first_key##*/} =~ ^lts-[a-zA-Z0-9]{8}$ ]]
 first_blob=$(awk '{print $2}' "$first_key.pub")
 second_blob=$(awk '{print $2}' "$second_key.pub")
 [[ $first_blob != "$second_blob" ]]
@@ -84,6 +85,15 @@ grep -qF "$second_blob" "$TEMP_AUTH"
 temp_key_revoke "${first##*/}" > /dev/null
 temp_key_revoke_all > /dev/null
 [[ ! -e $second_key && -f $second/revoked-at ]]
+cmp "$TEMP_AUTH" "$work/original-authorized"
+long_legacy=$TEMP_ROOT/key-20261002T120000Z-Ab12Cd34Ef56Gh78Ij90Kl12
+mkdir -p "$long_legacy"
+long_key=$(temp_key_file "$long_legacy")
+[[ $long_key == "$long_legacy/lts-${long_legacy##*/}" ]]
+ssh-keygen -q -t ed25519 -N '' -f "$long_key"
+cat "$long_key.pub" >> "$TEMP_AUTH"
+temp_key_revoke_all > /dev/null
+[[ ! -e $long_key && -f $long_legacy/revoked-at ]]
 cmp "$TEMP_AUTH" "$work/original-authorized"
 if (temp_key_revoke '../escape') > /dev/null 2>&1; then exit 1; fi
 say 'PASS: unique real keypairs, private/public match, individual and bulk revocation, permanent keys byte-for-byte preserved, invalid ID rejected'

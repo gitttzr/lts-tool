@@ -79,7 +79,7 @@ lts-tool --health-status
 
 ## 临时授权 AI 维护
 
-从 1.0.8 起，每次生成使用时间戳加 24 位随机后缀作为编号，私钥文件名为 `lts-完整编号`，公钥再加 `.pub`；跨服务器下载时无需都保存为 `id_ed25519`。旧版密钥无需改名，查看和撤销继续兼容。
+从 1.0.9 起，每次生成 8 位随机字符：编号如 `key-A7k2m9Qx`，私钥文件名为 `lts-A7k2m9Qx`，公钥为 `lts-A7k2m9Qx.pub`。本机目录由 mktemp 排除已有名称；跨服务器随机重名概率很低，但不保证绝不重名。旧版密钥无需改名，查看和撤销继续兼容。
 
 通过 SSH 交互式生成后，工具自动打开位于密钥目录的临时 Bash Shell；这时从 Xshell 打开 Xftp 或远程文件管理器即可按终端提供的当前目录定位。下载无 `.pub` 后缀的私钥文件，完成后输入 `exit` 返回菜单。工具会释放操作锁，避免下载期间阻塞健康守护。非交互运行只输出路径，不打开 Shell。
 
@@ -94,8 +94,8 @@ sudo lts-tool --temp-key-create
 每次使用系统随机源生成新的 Ed25519 密钥对，不复用以前的私钥；每次生成有独立编号和目录。公钥追加到 `/root/.ssh/authorized_keys`，不替换已有公钥。生成后显示编号、指纹及私钥绝对路径，例如：
 
 ```text
-临时 root 密钥已生成并添加。编号：key-20261002T120000Z-Ab12Cd34Ef56Gh78Ij90Kl12
-私钥文件（在这台服务器上）：/var/lib/linux-server-tool/temporary-keys/key-20261002T120000Z-Ab12Cd34Ef56Gh78Ij90Kl12/lts-key-20261002T120000Z-Ab12Cd34Ef56Gh78Ij90Kl12
+临时 root 密钥已生成并添加。编号：key-A7k2m9Qx
+私钥文件（在这台服务器上）：/var/lib/linux-server-tool/temporary-keys/key-A7k2m9Qx/lts-A7k2m9Qx
 ```
 
 此路径位于 **Linux 服务器**，不是本地电脑路径，也不是下载网址。通过你现有的可信 SSH/SFTP 连接下载该文件到执行维护的电脑，再让 AI 使用本地私钥文件路径连接。私钥无口令，服务器上权限为 `600`，所在目录为 `700`；脚本不会在终端打印私钥正文。
@@ -103,8 +103,8 @@ sudo lts-tool --temp-key-create
 客户端连接示例（替换地址、端口和私钥路径）：
 
 ```bash
-chmod 600 /本地路径/lts-key-20261002T120000Z-Ab12Cd34Ef56Gh78Ij90Kl12
-ssh -o IdentitiesOnly=yes -i /本地路径/lts-key-20261002T120000Z-Ab12Cd34Ef56Gh78Ij90Kl12 -p SSH端口 root@服务器地址
+chmod 600 /本地路径/lts-A7k2m9Qx
+ssh -o IdentitiesOnly=yes -i /本地路径/lts-A7k2m9Qx -p SSH端口 root@服务器地址
 ```
 
 维护完成后，在主菜单 3 的子菜单选择 **3** 撤销指定编号，或选择 **4** 一键撤销全部临时密钥。也可执行：

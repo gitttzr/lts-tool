@@ -6,7 +6,7 @@ set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 umask 077
-VERSION=1.0.8
+VERSION=1.0.9
 BASE=/var/lib/linux-server-tool
 SELF=/usr/local/sbin/lts-tool
 KEY_CONFIG=/etc/lts-tool/root_authorized_keys
@@ -594,7 +594,9 @@ temp_key_publish() {
 }
 temp_key_file() {
     local dir=$1 id=${1##*/}
-    if [[ $id =~ ^key-[0-9]{8}T[0-9]{6}Z-[a-zA-Z0-9]{24}$ ]]; then
+    if [[ $id =~ ^key-[a-zA-Z0-9]{8}$ ]]; then
+        printf '%s/lts-%s\n' "$dir" "${id#key-}"
+    elif [[ $id =~ ^key-[0-9]{8}T[0-9]{6}Z-[a-zA-Z0-9]{24}$ ]]; then
         printf '%s/lts-%s\n' "$dir" "$id"
     else
         printf '%s/id_ed25519\n' "$dir"
@@ -618,7 +620,7 @@ temp_key_create() (
     temp_key_paths
     temp_key_preflight
     local dir id keyfile staged=''
-    dir=$(mktemp -d "$TEMP_ROOT/key-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXXXXXXXXXXXXXXXXXXXX")
+    dir=$(mktemp -d "$TEMP_ROOT/key-XXXXXXXX")
     id=${dir##*/}
     keyfile=$(temp_key_file "$dir")
     # Keep the registry on failures so any already-published key remains revocable.
@@ -675,7 +677,7 @@ temp_key_revoke() (
         read -r -p '输入要撤销的密钥编号（留空返回）：' id
         [[ -n $id ]] || return 0
     fi
-    [[ $id =~ ^key-[0-9]{8}T[0-9]{6}Z-([a-zA-Z0-9]{8}|[a-zA-Z0-9]{24})$ ]] || die '密钥编号格式不正确。'
+    [[ $id =~ ^key-([a-zA-Z0-9]{8}|[0-9]{8}T[0-9]{6}Z-([a-zA-Z0-9]{8}|[a-zA-Z0-9]{24}))$ ]] || die '密钥编号格式不正确。'
     dir=$TEMP_ROOT/$id
     [[ -d $dir && ! -L $dir ]] || die '找不到该临时密钥。'
     keyfile=$(temp_key_file "$dir")
