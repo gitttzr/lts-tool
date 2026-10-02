@@ -76,15 +76,24 @@ second_blob=$(awk '{print $2}' "$second_key.pub")
 grep -qF "$first_blob" "$TEMP_AUTH"
 grep -qF "$second_blob" "$TEMP_AUTH"
 if grep -q 'BEGIN OPENSSH PRIVATE KEY' "$work/create-1.log" "$work/create-2.log"; then exit 1; fi
-temp_key_revoke "${first##*/}" > /dev/null
-[[ ! -e $first_key && -f $first/revoked-at ]]
+temp_key_list > "$work/numbered-list"
+grep -qF "1) ${first##*/}" "$work/numbered-list"
+cp "$TEMP_AUTH" "$work/before-selection"
+for selection in 0 999999999 invalid '../escape'; do
+    if (temp_key_revoke <<< "$selection") > /dev/null 2>&1; then exit 1; fi
+    cmp "$TEMP_AUTH" "$work/before-selection"
+done
+temp_key_revoke <<< '' > /dev/null
+cmp "$TEMP_AUTH" "$work/before-selection"
+temp_key_revoke <<< 1 > /dev/null
+[[ ! -e $first_key && ! -e $first_key.pub && -f $first/revoked-at ]]
 ! grep -qF "$first_blob" "$TEMP_AUTH"
 grep -qF "$second_blob" "$TEMP_AUTH"
 [[ -f $second_key ]]
 # Repeat revocation safely, then revoke all and compare original bytes.
 temp_key_revoke "${first##*/}" > /dev/null
 temp_key_revoke_all > /dev/null
-[[ ! -e $second_key && -f $second/revoked-at ]]
+[[ ! -e $second_key && ! -e $second_key.pub && -f $second/revoked-at ]]
 cmp "$TEMP_AUTH" "$work/original-authorized"
 long_legacy=$TEMP_ROOT/key-20261002T120000Z-Ab12Cd34Ef56Gh78Ij90Kl12
 mkdir -p "$long_legacy"
@@ -93,7 +102,7 @@ long_key=$(temp_key_file "$long_legacy")
 ssh-keygen -q -t ed25519 -N '' -f "$long_key"
 cat "$long_key.pub" >> "$TEMP_AUTH"
 temp_key_revoke_all > /dev/null
-[[ ! -e $long_key && -f $long_legacy/revoked-at ]]
+[[ ! -e $long_key && ! -e $long_key.pub && -f $long_legacy/revoked-at ]]
 cmp "$TEMP_AUTH" "$work/original-authorized"
 if (temp_key_revoke '../escape') > /dev/null 2>&1; then exit 1; fi
 say 'PASS: unique real keypairs, private/public match, individual and bulk revocation, permanent keys byte-for-byte preserved, invalid ID rejected'
@@ -106,7 +115,7 @@ cat "$legacy/id_ed25519.pub" >> "$TEMP_AUTH"
 temp_key_list > "$work/legacy-list"
 grep -qF "$legacy/id_ed25519" "$work/legacy-list"
 temp_key_revoke "${legacy##*/}" > /dev/null
-[[ ! -e $legacy/id_ed25519 ]]
+[[ ! -e $legacy/id_ed25519 && ! -e $legacy/id_ed25519.pub ]]
 cmp "$TEMP_AUTH" "$work/original-authorized"
 (
     exec 9>"$work/download-lock"

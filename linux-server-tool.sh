@@ -6,7 +6,7 @@ set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 umask 077
-VERSION=1.0.9
+VERSION=1.0.10
 BASE=/var/lib/linux-server-tool
 SELF=/usr/local/sbin/lts-tool
 KEY_CONFIG=/etc/lts-tool/root_authorized_keys
@@ -653,9 +653,12 @@ temp_key_create() (
 temp_key_list() {
     temp_key_paths
     local dir id keyfile found=0
+    TEMP_KEY_IDS=()
     for dir in "$TEMP_ROOT"/key-*; do
         [[ -d $dir && ! -L $dir ]] || continue
         found=1; id=${dir##*/}
+        TEMP_KEY_IDS+=("$id")
+        say "${#TEMP_KEY_IDS[@]}) $id"
         keyfile=$(temp_key_file "$dir")
         if [[ -f $dir/revoked-at ]]; then
             say "$id  已撤销（$(cat "$dir/revoked-at")）"
@@ -671,11 +674,16 @@ temp_key_list() {
 }
 temp_key_revoke() (
     temp_key_paths
-    local id=${1:-} dir keyfile type blob comment staged=''
+    local id=${1:-} dir keyfile type blob comment selection staged=''
     if [[ -z $id ]]; then
         temp_key_list
-        read -r -p '输入要撤销的密钥编号（留空返回）：' id
-        [[ -n $id ]] || return 0
+        ((${#TEMP_KEY_IDS[@]} > 0)) || return 0
+        read -r -p '输入上方数字序号（留空返回）：' selection
+        [[ -n $selection ]] || return 0
+        [[ $selection =~ ^[0-9]{1,9}$ ]] || die '请输入列表中的数字序号。'
+        selection=$((10#$selection))
+        ((selection >= 1 && selection <= ${#TEMP_KEY_IDS[@]})) || die '序号不在列表范围内。'
+        id=${TEMP_KEY_IDS[selection-1]}
     fi
     [[ $id =~ ^key-([a-zA-Z0-9]{8}|[0-9]{8}T[0-9]{6}Z-([a-zA-Z0-9]{8}|[a-zA-Z0-9]{24}))$ ]] || die '密钥编号格式不正确。'
     dir=$TEMP_ROOT/$id
@@ -698,13 +706,14 @@ temp_key_revoke() (
             temp_key_publish "$staged"
             staged=''
         fi
-    elif [[ -f $dir/created-at ]]; then
+    elif [[ -f $dir/created-at && ! -f $dir/revoked-at ]]; then
         die '已生成密钥的公钥记录丢失，不能确认撤销；请人工检查 authorized_keys。'
     fi
-    # Only remove our private-key file after the server authorization is removed.
-    rm -f -- "$keyfile"
-    date -u +%Y-%m-%dT%H:%M:%SZ > "$dir/revoked-at"
-    say "已撤销 $id：对应公钥授权已移除，服务器上的私钥文件已删除。"
+    # Record completed authorization removal before deleting the public record,
+    # so retries after an interrupted cleanup remain safe and idempotent.
+    [[ -f $dir/revoked-at ]] || date -u +%Y-%m-%dT%H:%M:%SZ > "$dir/revoked-at"
+    rm -f -- "$keyfile" "$keyfile.pub"
+    say "已撤销 $id：对应公钥授权已移除，服务器上的公钥和私钥文件已删除。"
     say '已有 SSH 会话不会被断开；请结束维护会话并删除下载到其他电脑的私钥副本。'
 )
 temp_key_revoke_all() {
@@ -714,12 +723,12 @@ temp_key_revoke_all() {
         [[ -d $dir && ! -L $dir ]] || continue
         temp_key_revoke "${dir##*/}"
     done
-    say '本工具登记的临时密钥已全部撤销，其他密钥保留。'
+    say '本工具登记的临时密钥已全部撤销，对应公钥和私钥文件已删除，其他密钥保留。'
 }
 temp_key_menu() {
     local c
     while true; do
-        say $'\n临时维护密钥（root）：\n1) 一键生成并添加临时密钥\n2) 查看密钥列表及私钥路径\n3) 撤销指定临时密钥并删除私钥\n4) 一键撤销全部临时密钥\n0) 返回'
+        say $'\n临时维护密钥（root）：\n1) 一键生成并添加临时密钥\n2) 查看密钥列表及私钥路径\n3) 按数字序号撤销临时密钥并删除公钥和私钥\n4) 撤销全部临时密钥并删除公钥和私钥\n0) 返回'
         read -r -p '请选择：' c
         case $c in
             1) run_action temp_key_create;; 2) run_action temp_key_list;;
