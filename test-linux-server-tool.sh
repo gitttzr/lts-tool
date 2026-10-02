@@ -64,26 +64,54 @@ temp_key_create > "$work/create-2.log"
 mapfile -t dirs < <(find "$TEMP_ROOT" -mindepth 1 -maxdepth 1 -type d | sort)
 [[ ${#dirs[@]} == 2 ]]
 first=${dirs[0]}; second=${dirs[1]}
-first_blob=$(awk '{print $2}' "$first/id_ed25519.pub")
-second_blob=$(awk '{print $2}' "$second/id_ed25519.pub")
+first_key=$(temp_key_file "$first"); second_key=$(temp_key_file "$second")
+[[ ${first_key##*/} != ${second_key##*/} ]]
+[[ ${first##*/} =~ ^key-[0-9]{8}T[0-9]{6}Z-[a-zA-Z0-9]{24}$ ]]
+first_blob=$(awk '{print $2}' "$first_key.pub")
+second_blob=$(awk '{print $2}' "$second_key.pub")
 [[ $first_blob != "$second_blob" ]]
-[[ $(ssh-keygen -y -f "$first/id_ed25519" | awk '{print $2}') == "$first_blob" ]]
-[[ $(ssh-keygen -y -f "$second/id_ed25519" | awk '{print $2}') == "$second_blob" ]]
+[[ $(ssh-keygen -y -f "$first_key" | awk '{print $2}') == "$first_blob" ]]
+[[ $(ssh-keygen -y -f "$second_key" | awk '{print $2}') == "$second_blob" ]]
 grep -qF "$first_blob" "$TEMP_AUTH"
 grep -qF "$second_blob" "$TEMP_AUTH"
 if grep -q 'BEGIN OPENSSH PRIVATE KEY' "$work/create-1.log" "$work/create-2.log"; then exit 1; fi
 temp_key_revoke "${first##*/}" > /dev/null
-[[ ! -e $first/id_ed25519 && -f $first/revoked-at ]]
+[[ ! -e $first_key && -f $first/revoked-at ]]
 ! grep -qF "$first_blob" "$TEMP_AUTH"
 grep -qF "$second_blob" "$TEMP_AUTH"
-[[ -f $second/id_ed25519 ]]
+[[ -f $second_key ]]
 # Repeat revocation safely, then revoke all and compare original bytes.
 temp_key_revoke "${first##*/}" > /dev/null
 temp_key_revoke_all > /dev/null
-[[ ! -e $second/id_ed25519 && -f $second/revoked-at ]]
+[[ ! -e $second_key && -f $second/revoked-at ]]
 cmp "$TEMP_AUTH" "$work/original-authorized"
 if (temp_key_revoke '../escape') > /dev/null 2>&1; then exit 1; fi
 say 'PASS: unique real keypairs, private/public match, individual and bulk revocation, permanent keys byte-for-byte preserved, invalid ID rejected'
+
+# Old registry entries and filenames remain revocable after the naming change.
+legacy=$TEMP_ROOT/key-20260930T120000Z-AbCd1234
+mkdir -p "$legacy"
+ssh-keygen -q -t ed25519 -N '' -f "$legacy/id_ed25519"
+cat "$legacy/id_ed25519.pub" >> "$TEMP_AUTH"
+temp_key_list > "$work/legacy-list"
+grep -qF "$legacy/id_ed25519" "$work/legacy-list"
+temp_key_revoke "${legacy##*/}" > /dev/null
+[[ ! -e $legacy/id_ed25519 ]]
+cmp "$TEMP_AUTH" "$work/original-authorized"
+(
+    exec 9>"$work/download-lock"
+    flock 9
+    bash() {
+        [[ $* == '--noprofile --norc -i' ]]
+        [[ $PWD == "$second" ]]
+        [[ $PROMPT_COMMAND == *'root@server:'* ]]
+        flock -n "$work/download-lock" -c true
+        echo shell-opened > "$work/download-shell"
+    }
+    temp_key_open_dir "$second" > "$work/download-output"
+    [[ -f $work/download-shell ]]
+)
+say 'PASS: legacy revocation compatibility and download shell directory/title/lock release'
 
 # Appending to a key file without a final newline must not join two keys.
 printf '%s' "$(cat "$work/permanent.pub")" > "$TEMP_AUTH"

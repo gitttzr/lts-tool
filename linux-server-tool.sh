@@ -6,7 +6,7 @@ set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 umask 077
-VERSION=1.0.7
+VERSION=1.0.8
 BASE=/var/lib/linux-server-tool
 SELF=/usr/local/sbin/lts-tool
 KEY_CONFIG=/etc/lts-tool/root_authorized_keys
@@ -592,46 +592,75 @@ temp_key_publish() {
     if command -v restorecon >/dev/null; then restorecon -F "$staged"; fi
     mv -f -- "$staged" "$TEMP_AUTH"
 }
+temp_key_file() {
+    local dir=$1 id=${1##*/}
+    if [[ $id =~ ^key-[0-9]{8}T[0-9]{6}Z-[a-zA-Z0-9]{24}$ ]]; then
+        printf '%s/lts-%s\n' "$dir" "$id"
+    else
+        printf '%s/id_ed25519\n' "$dir"
+    fi
+}
+temp_key_open_dir() (
+    local dir=$1
+    cd -- "$dir" || return $?
+    # Do not hold the operation lock while the user downloads files.
+    flock -u 9 2>/dev/null || true
+    exec 9>&-
+    say '已进入密钥目录。现在可从 Xshell 打开 Xftp/文件管理器下载私钥。'
+    say '下载后输入 exit 返回工具菜单；关闭此临时 Shell 不会撤销密钥。'
+    # Xshell/Xftp use the terminal title to discover the current directory.
+    export PROMPT_COMMAND='printf "\033]0;root@server:%s\007" "$PWD"'
+    export PS1='[lts-key-download] \w # '
+    printf '\033]0;root@server:%s\007' "$PWD"
+    bash --noprofile --norc -i || true
+)
 temp_key_create() (
     temp_key_paths
     temp_key_preflight
-    local dir id staged=''
-    dir=$(mktemp -d "$TEMP_ROOT/key-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXXXX")
+    local dir id keyfile staged=''
+    dir=$(mktemp -d "$TEMP_ROOT/key-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXXXXXXXXXXXXXXXXXXXX")
     id=${dir##*/}
+    keyfile=$(temp_key_file "$dir")
     # Keep the registry on failures so any already-published key remains revocable.
     trap '[[ -z $staged ]] || rm -f -- "$staged"' EXIT
-    ssh-keygen -q -t ed25519 -N '' -C "lts-tool-temp:$id" -f "$dir/id_ed25519"
-    chmod 600 "$dir/id_ed25519" "$dir/id_ed25519.pub"
+    ssh-keygen -q -t ed25519 -N '' -C "lts-tool-temp:$id" -f "$keyfile"
+    chmod 600 "$keyfile" "$keyfile.pub"
     date -u +%Y-%m-%dT%H:%M:%SZ > "$dir/created-at"
     staged=$(mktemp "${TEMP_AUTH%/*}/.lts-key.XXXXXXXX")
     if [[ -f $TEMP_AUTH ]]; then
         cp --preserve=all -- "$TEMP_AUTH" "$staged"
         if [[ -s $staged && $(tail -c 1 "$staged" | wc -l) == 0 ]]; then printf '\n' >> "$staged"; fi
     fi
-    cat "$dir/id_ed25519.pub" >> "$staged"
+    cat "$keyfile.pub" >> "$staged"
     temp_key_publish "$staged"
     staged=''
     say "临时 root 密钥已生成并添加。编号：$id"
-    say "私钥文件（在这台服务器上）：$dir/id_ed25519"
-    say "公钥指纹：$(ssh-keygen -lf "$dir/id_ed25519.pub")"
+    say "私钥文件（在这台服务器上）：$keyfile"
+    say "公钥指纹：$(ssh-keygen -lf "$keyfile.pub")"
     say '私钥无口令，文件权限为 600；请通过现有可信连接下载到执行维护的电脑。'
     say '客户端示例（替换私钥本地路径、服务器地址及端口）：'
-    say '  ssh -o IdentitiesOnly=yes -i /本地路径/id_ed25519 -p SSH端口 root@服务器地址'
+    say "  ssh -o IdentitiesOnly=yes -i /本地路径/${keyfile##*/} -p SSH端口 root@服务器地址"
     say "维护结束后撤销：$SELF --temp-key-revoke $id"
     say '这是完整 root 权限。密钥不会自动过期；维护结束后请撤销。'
+    if [[ -t 0 && -t 1 ]]; then
+        temp_key_open_dir "$dir"
+    else
+        say "密钥目录：$dir（非交互运行，不打开 Shell）"
+    fi
 )
 temp_key_list() {
     temp_key_paths
-    local dir id found=0
+    local dir id keyfile found=0
     for dir in "$TEMP_ROOT"/key-*; do
         [[ -d $dir && ! -L $dir ]] || continue
         found=1; id=${dir##*/}
+        keyfile=$(temp_key_file "$dir")
         if [[ -f $dir/revoked-at ]]; then
             say "$id  已撤销（$(cat "$dir/revoked-at")）"
-        elif [[ -f $dir/id_ed25519.pub ]]; then
+        elif [[ -f $keyfile.pub ]]; then
             say "$id  未撤销（授权是否可用以实际 SSH 登录为准）"
-            say "  私钥：$dir/id_ed25519"
-            ssh-keygen -lf "$dir/id_ed25519.pub"
+            say "  私钥：$keyfile"
+            ssh-keygen -lf "$keyfile.pub"
         else
             say "$id  生成未完成；未添加公钥，可选择该编号清理。"
         fi
@@ -640,21 +669,22 @@ temp_key_list() {
 }
 temp_key_revoke() (
     temp_key_paths
-    local id=${1:-} dir type blob comment staged=''
+    local id=${1:-} dir keyfile type blob comment staged=''
     if [[ -z $id ]]; then
         temp_key_list
         read -r -p '输入要撤销的密钥编号（留空返回）：' id
         [[ -n $id ]] || return 0
     fi
-    [[ $id =~ ^key-[0-9]{8}T[0-9]{6}Z-[a-zA-Z0-9]{8}$ ]] || die '密钥编号格式不正确。'
+    [[ $id =~ ^key-[0-9]{8}T[0-9]{6}Z-([a-zA-Z0-9]{8}|[a-zA-Z0-9]{24})$ ]] || die '密钥编号格式不正确。'
     dir=$TEMP_ROOT/$id
     [[ -d $dir && ! -L $dir ]] || die '找不到该临时密钥。'
-    [[ ! -L $dir/id_ed25519.pub ]] || die '公钥记录不能是符号链接。'
+    keyfile=$(temp_key_file "$dir")
+    [[ ! -L $keyfile.pub ]] || die '公钥记录不能是符号链接。'
     trap '[[ -z $staged ]] || rm -f -- "$staged"' EXIT
-    if [[ -f $dir/id_ed25519.pub ]]; then
-        read -r type blob comment < "$dir/id_ed25519.pub"
+    if [[ -f $keyfile.pub ]]; then
+        read -r type blob comment < "$keyfile.pub"
         [[ $type == ssh-ed25519 && -n $blob ]] || die '公钥记录损坏，停止撤销。'
-        ssh-keygen -lf "$dir/id_ed25519.pub" >/dev/null
+        ssh-keygen -lf "$keyfile.pub" >/dev/null
         if [[ -f $TEMP_AUTH ]]; then
             staged=$(mktemp "${TEMP_AUTH%/*}/.lts-key.XXXXXXXX")
             cp --preserve=all -- "$TEMP_AUTH" "$staged"
@@ -670,7 +700,7 @@ temp_key_revoke() (
         die '已生成密钥的公钥记录丢失，不能确认撤销；请人工检查 authorized_keys。'
     fi
     # Only remove our private-key file after the server authorization is removed.
-    rm -f -- "$dir/id_ed25519"
+    rm -f -- "$keyfile"
     date -u +%Y-%m-%dT%H:%M:%SZ > "$dir/revoked-at"
     say "已撤销 $id：对应公钥授权已移除，服务器上的私钥文件已删除。"
     say '已有 SSH 会话不会被断开；请结束维护会话并删除下载到其他电脑的私钥副本。'
