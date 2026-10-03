@@ -90,11 +90,26 @@ temp_key_revoke <<< 1 > /dev/null
 ! grep -qF "$first_blob" "$TEMP_AUTH"
 grep -qF "$second_blob" "$TEMP_AUTH"
 [[ -f $second_key ]]
+temp_key_list > "$work/after-revoke-list"
+! grep -qF "${first##*/}" "$work/after-revoke-list"
+grep -qF "1) ${second##*/}" "$work/after-revoke-list"
+[[ ${#TEMP_KEY_IDS[@]} == 1 && ${TEMP_KEY_IDS[0]} == "${second##*/}" ]]
 # Repeat revocation safely, then revoke all and compare original bytes.
 temp_key_revoke "${first##*/}" > /dev/null
 temp_key_revoke_all > /dev/null
 [[ ! -e $second_key && ! -e $second_key.pub && -f $second/revoked-at ]]
 cmp "$TEMP_AUTH" "$work/original-authorized"
+temp_key_list > "$work/empty-list"
+grep -qx '没有临时维护密钥。' "$work/empty-list"
+[[ ${#TEMP_KEY_IDS[@]} == 0 ]]
+# Interrupted file cleanup stays visible and can be retried by number.
+touch "$second_key"
+temp_key_list > "$work/incomplete-list"
+grep -qF '密钥文件清理未完成' "$work/incomplete-list"
+temp_key_revoke <<< 1 > /dev/null
+[[ ! -e $second_key ]]
+temp_key_list > "$work/clean-list"
+[[ ${#TEMP_KEY_IDS[@]} == 0 ]]
 long_legacy=$TEMP_ROOT/key-20261002T120000Z-Ab12Cd34Ef56Gh78Ij90Kl12
 mkdir -p "$long_legacy"
 long_key=$(temp_key_file "$long_legacy")

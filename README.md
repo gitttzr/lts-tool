@@ -1,6 +1,16 @@
 # Linux 服务器工具
 
-提供 Tailscale、SSH、临时维护密钥、更新工具和健康守护五个主菜单，各有子菜单。脚本文件：`linux-server-tool.sh`。
+提供 Tailscale、SSH、临时维护密钥、更新工具、健康守护和谷歌 BBR 六个主菜单，各有子菜单。脚本文件：`linux-server-tool.sh`。
+
+## 谷歌 BBR（1.0.11）
+
+面向 Ubuntu 22.04 的 systemd VPS。主菜单 **6）谷歌 BBR → 1）启用并永久启用 BBR**，或 root 执行 `lts-tool --bbr-enable`；查看状态使用 `lts-tool --bbr-status`。
+
+使用当前内核提供的原生 BBR，不更换内核。检测并加载 `tcp_bbr` 和 `sch_fq`，立即应用 `net.ipv4.tcp_congestion_control=bbr` 和 `net.core.default_qdisc=fq`，验证成功后提示完成。内核不支持或容器禁止修改时明确报错。
+
+持久参数保存到 `/etc/sysctl.d/99-lts-tool-bbr.conf`，模块保存到 `/etc/modules-load.d/lts-tool-bbr.conf`。启用 `lts-tool-bbr.service`，每次启动在系统 sysctl 加载完成后重新应用这两个参数，避免原有 `/etc/sysctl.conf` 等设置覆盖；不修改其他调优文件。重复启用不会追加重复配置。升级脚本会保留这些设置。
+
+无需重启即可对新 TCP 连接生效；不强制重建当前接口队列，也不打断已有连接。VPS 重启后可用 `lts-tool --bbr-status` 验证算法为 `bbr`、默认队列为 `fq`、开机服务已启用。之后其他工具改写参数、宿主机限制或更换为不支持 BBR 的内核仍可能影响生效；开机失败可查看 `journalctl -u lts-tool-bbr.service`。
 
 ## 使用
 
@@ -47,6 +57,8 @@ Tailscale 菜单第 9 项分为「正常登录/恢复连接」和「强制重新
 第 1 项负责从 `/etc/lts-tool/root_authorized_keys` 导入 root 公钥。第 2 项仅调整登录认证方式，不再导入公钥，也不修改已有公钥文件、AuthorizedKeysFile 路径或 PermitRootLogin 设置；请先确认已有公钥能够登录，再使用第 2 项。第 2 项仍保留三分钟未确认自动回退机制。
 
 **临时维护密钥（root）：**一键生成并添加临时密钥、查看列表和私钥路径、撤销指定密钥、一键撤销全部临时密钥。
+
+从 1.0.12 起，已撤销且公私钥文件已删除的密钥不再显示在列表中，也不占用选择序号；此前留下的撤销记录同样自动隐藏。清理中断仍有残留文件的记录会显示“密钥文件清理未完成”，可再次选择清理。
 
 **更新工具：**一键更新到仓库 main 分支最新版本、查看当前版本和更新来源。更新成功会自动重新打开新版主菜单。
 

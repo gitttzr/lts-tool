@@ -6,7 +6,7 @@ set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 umask 077
-VERSION=1.0.10
+VERSION=1.0.12
 BASE=/var/lib/linux-server-tool
 SELF=/usr/local/sbin/lts-tool
 KEY_CONFIG=/etc/lts-tool/root_authorized_keys
@@ -14,6 +14,73 @@ CONF=/etc/ssh/sshd_config
 BEGIN='# BEGIN LINUX-SERVER-TOOL'
 END='# END LINUX-SERVER-TOOL'
 HEALTH_STATE=/run/lts-tool-health
+BBR_SYSCTL=/etc/sysctl.d/99-lts-tool-bbr.conf
+BBR_MODULES=/etc/modules-load.d/lts-tool-bbr.conf
+BBR_SERVICE=/etc/systemd/system/lts-tool-bbr.service
+
+bbr_status() {
+    say "当前 TCP 拥塞控制：$(sysctl -n net.ipv4.tcp_congestion_control)"
+    say "默认队列：$(sysctl -n net.core.default_qdisc)"
+    say "可用算法：$(sysctl -n net.ipv4.tcp_available_congestion_control)"
+    if systemctl is-enabled --quiet lts-tool-bbr.service; then
+        say 'BBR 开机应用服务：已启用'
+    else say 'BBR 开机应用服务：未启用'; fi
+    say "持久配置：$BBR_SYSCTL"
+    say '默认算法作用于新 TCP 连接；现有连接及接口队列不会强制重建。'
+}
+bbr_enable() {
+    need sysctl; need modprobe
+    # Check support before writing persistent settings. Built-in BBR needs no load.
+    if [[ " $(sysctl -n net.ipv4.tcp_available_congestion_control) " != *' bbr '* ]]; then
+        modprobe tcp_bbr || die '当前 VPS 内核无法加载 tcp_bbr；请检查宿主机限制或内核模块。'
+    fi
+    [[ " $(sysctl -n net.ipv4.tcp_available_congestion_control) " == *' bbr '* ]] || die '当前内核不支持 BBR。'
+    modprobe sch_fq || die '当前内核无法加载 fq 队列模块。'
+    local file
+    for file in "$BBR_SYSCTL" "$BBR_MODULES" "$BBR_SERVICE"; do
+        [[ ! -L $file && ( ! -e $file || -f $file ) ]] || die "配置路径不是普通文件：$file"
+    done
+    # Validate write permission (including restricted VPS containers) before saving.
+    sysctl -w net.core.default_qdisc=fq net.ipv4.tcp_congestion_control=bbr || die '无法应用 BBR，未写入持久配置。'
+    install -d -m 755 "${BBR_SYSCTL%/*}" "${BBR_MODULES%/*}" "${BBR_SERVICE%/*}"
+    printf 'net.core.default_qdisc = fq\nnet.ipv4.tcp_congestion_control = bbr\n' > "$BBR_SYSCTL"
+    printf 'tcp_bbr\nsch_fq\n' > "$BBR_MODULES"
+    # Apply after Ubuntu/procps and systemd sysctl loaders, including sysctl.conf.
+    # This avoids older conflicting tuning settings winning during boot.
+    cat > "$BBR_SERVICE" <<EOF
+[Unit]
+Description=Apply persistent lts-tool BBR settings
+After=systemd-modules-load.service systemd-sysctl.service procps.service
+Before=network-pre.target
+Wants=network-pre.target
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/sysctl -p $BBR_SYSCTL
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 644 "$BBR_SYSCTL" "$BBR_MODULES" "$BBR_SERVICE"
+    systemctl daemon-reload
+    systemctl enable lts-tool-bbr.service
+    systemctl restart lts-tool-bbr.service
+    systemctl is-enabled --quiet lts-tool-bbr.service || die 'BBR 开机服务未成功启用。'
+    [[ $(sysctl -n net.ipv4.tcp_congestion_control) == bbr && $(sysctl -n net.core.default_qdisc) == fq ]] || die 'BBR 生效验证失败，请检查配置。'
+    say '谷歌 BBR 已立即启用，并配置为每次开机自动应用（bbr + fq）。'
+    bbr_status
+}
+bbr_menu() {
+    local c
+    while true; do
+        say $'\n谷歌 BBR（Ubuntu 22.04）：\n1) 启用并永久启用 BBR\n2) 查看 BBR 状态\n0) 返回'
+        read -r -p '请选择：' c
+        case $c in
+            1) bash "$SELF" --bbr-enable || say 'BBR 启用未完成，请查看上方错误。';;
+            2) bash "$SELF" --bbr-status || say '无法读取 BBR 状态。';;
+            0) return;; *) say '无效选择。';;
+        esac
+    done
+}
 
 # Local liveness probes only: no external host or control-plane reachability test.
 health_probe_tailscale() {
@@ -656,12 +723,16 @@ temp_key_list() {
     TEMP_KEY_IDS=()
     for dir in "$TEMP_ROOT"/key-*; do
         [[ -d $dir && ! -L $dir ]] || continue
+        keyfile=$(temp_key_file "$dir")
+        # Keep incomplete cleanup selectable, but hide completed revocations.
+        if [[ -f $dir/revoked-at && ! -e $keyfile && ! -L $keyfile && ! -e $keyfile.pub && ! -L $keyfile.pub ]]; then
+            continue
+        fi
         found=1; id=${dir##*/}
         TEMP_KEY_IDS+=("$id")
         say "${#TEMP_KEY_IDS[@]}) $id"
-        keyfile=$(temp_key_file "$dir")
         if [[ -f $dir/revoked-at ]]; then
-            say "$id  已撤销（$(cat "$dir/revoked-at")）"
+            say "$id  已撤销，密钥文件清理未完成；可选择该编号继续清理。"
         elif [[ -f $keyfile.pub ]]; then
             say "$id  未撤销（授权是否可用以实际 SSH 登录为准）"
             say "  私钥：$keyfile"
@@ -1050,6 +1121,8 @@ main() {
         --health-enable) health_enable; return;;
         --health-disable) health_disable; return;;
         --health-status) health_status; return;;
+        --bbr-enable) no_pending; bbr_enable; return;;
+        --bbr-status) bbr_status; return;;
         --tailscale-connect) no_pending; tailscale_auth connect; return;;
         --tailscale-reauth) no_pending; tailscale_auth reauth; return;;
         --confirm) confirm_change "${2:-}"; return;;
@@ -1061,12 +1134,12 @@ main() {
         --temp-key-revoke) [[ -n ${2:-} ]] || die '请提供临时密钥编号。'; temp_key_revoke "$2"; return;;
         --temp-key-revoke-all) temp_key_revoke_all; return;;
         '') health_default_enable;;
-        *) die '参数：--version | --update | --health-enable | --health-disable | --health-status | --status | --tailscale-connect | --tailscale-reauth | --rescue-ssh | --public-ssh | --rollback | --confirm 确认码 | --temp-key-create | --temp-key-list | --temp-key-revoke 编号 | --temp-key-revoke-all';;
+        *) die '参数：--version | --update | --bbr-enable | --bbr-status | --health-enable | --health-disable | --health-status | --status | --tailscale-connect | --tailscale-reauth | --rescue-ssh | --public-ssh | --rollback | --confirm 确认码 | --temp-key-create | --temp-key-list | --temp-key-revoke 编号 | --temp-key-revoke-all';;
     esac
     flock -u 9
     local c
     while true; do
-        say $'\nLinux 服务器工具\n1) Tailscale 管理\n2) SSH 管理\n3) 临时维护密钥（root）\n4) 更新工具\n5) 健康守护\n0) 退出'
+        say $'\nLinux 服务器工具\n1) Tailscale 管理\n2) SSH 管理\n3) 临时维护密钥（root）\n4) 更新工具\n5) 健康守护\n6) 谷歌 BBR（永久启用）\n0) 退出'
         read -r -p '请选择：' c
         # Submenus run in a child, so errors return to the main menu.
         case $c in
@@ -1075,6 +1148,7 @@ main() {
             3) bash "$SELF" --internal-temp-keys || say '临时密钥操作中止，请查看提示。';;
             4) update_menu;;
             5) health_menu;;
+            6) bbr_menu;;
             0) return;; *) say '无效选择。';;
         esac
     done
