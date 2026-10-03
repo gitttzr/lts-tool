@@ -18,6 +18,7 @@ jobs:
           bash test-linux-server-tool.sh
           bash test-health.sh
           bash test-bbr.sh
+          bash test-shortcut.sh
   sshd-integration:
     runs-on: ubuntu-latest
     strategy:

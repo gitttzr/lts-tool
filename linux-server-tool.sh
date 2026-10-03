@@ -6,7 +6,7 @@ set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 umask 077
-VERSION=1.0.12
+VERSION=1.0.13
 BASE=/var/lib/linux-server-tool
 SELF=/usr/local/sbin/lts-tool
 KEY_CONFIG=/etc/lts-tool/root_authorized_keys
@@ -1101,6 +1101,12 @@ ssh_menu() {
 }
 main() {
     if [[ ${1:-} == --version ]]; then say "lts-tool $VERSION"; return; fi
+    if [[ ${1:-} == tailscale ]]; then
+        (($# == 1)) || die '用法：lts-tool tailscale'
+        need tailscale
+        tailscale status
+        return
+    fi
     root_check
     need flock
     exec 9>"$BASE/lock"
