@@ -20,6 +20,7 @@ jobs:
           bash test-bbr.sh
           bash test-shortcut.sh
           bash test-dns.sh
+          bash test-key-input.sh
   sshd-integration:
     runs-on: ubuntu-latest
     strategy:

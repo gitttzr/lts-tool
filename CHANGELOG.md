@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.17 — 2026-10-04
+
+- SSH 第 1 项发现长期公钥配置为空时直接提示输入，验证保存后继续安装；错误输入可重试，留空取消。
+
 ## 1.0.16 — 2026-10-04
 
 - networkd 环境通过 Netplan generate 生成配置，直接 reload/reconfigure，避免 apply 的网卡重命名及多次 DHCP 中断。

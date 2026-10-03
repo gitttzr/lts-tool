@@ -6,7 +6,7 @@ set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 umask 077
-VERSION=1.0.16
+VERSION=1.0.17
 BASE=/var/lib/linux-server-tool
 SELF=/usr/local/sbin/lts-tool
 KEY_CONFIG=/etc/lts-tool/root_authorized_keys
@@ -576,6 +576,32 @@ rescue_public_ssh() {
     fi
     connection_mode public rescue
 }
+ensure_key_config() (
+    init_key_config
+    # Comments and whitespace do not count as a configured public key.
+    if grep -qEv '^[[:space:]]*(#|$)' "$KEY_CONFIG"; then return 0; fi
+    local line staged probe
+    need ssh-keygen
+    staged=$(mktemp "${KEY_CONFIG%/*}/.keys.XXXXXXXX")
+    probe=$(mktemp "${KEY_CONFIG%/*}/.validate.XXXXXXXX")
+    trap 'rm -f -- "$staged" "$probe"' EXIT
+    say '长期公钥配置为空。请粘贴一整行 SSH 公钥（不是私钥），留空取消。'
+    while true; do
+        read -r -p '长期公钥：' line || return 1
+        line=${line%$'\r'}
+        [[ ! $line =~ ^[[:space:]]*$ ]] || return 1
+        if [[ $line == ssh-* || $line == ecdsa-* || $line == sk-* ]]; then
+            printf '%s\n' "$line" > "$probe"
+            if ssh-keygen -lf "$probe" >/dev/null 2>&1; then break; fi
+        fi
+        say '公钥无效，请重新粘贴完整公钥；留空取消。'
+    done
+    cp -- "$KEY_CONFIG" "$staged" || die '无法准备长期公钥配置。'
+    printf '\n%s\n' "$line" >> "$staged" || die '无法保存长期公钥。'
+    chmod 600 "$staged" || die '无法设置长期公钥配置权限。'
+    mv -f -- "$staged" "$KEY_CONFIG" || die '无法保存长期公钥配置。'
+    say '长期公钥已验证并保存，继续安装。'
+)
 install_keys() {
     local line tmp count=0 root_home
     init_key_config
@@ -609,6 +635,7 @@ install_keys() {
 }
 key_login() {
     simple_config_check
+    if ! ensure_key_config; then say '已取消安装 root 公钥。'; return 0; fi
     install_keys
     begin_change
     managed_set PubkeyAuthentication yes
