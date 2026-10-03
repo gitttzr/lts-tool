@@ -48,6 +48,10 @@ sudo nano /etc/lts-tool/root_authorized_keys
 
 **Tailscale：**官方安装/更新最新稳定版、DNS 检测与修改、SSH 私网/公网切换、修改 Tailscale 主机名、服务自启与自动重启、状态、登录授权。
 
+1.0.14 修复 Ubuntu 阿里云 ECS 自动下发 DNS：按[阿里云官方文档](https://help.aliyun.com/zh/ecs/ubuntu-system-configuration-custom-dns-server)，通过 cloud.cfg.d 禁用 cloud-init 网络配置再生成，并修改现有 Netplan 的自定义 nameservers 和 DHCP use-dns；保留 IP、路由、网卡匹配及 DHCP 获取地址。无需改为静态 IP。适用于标准 /etc/netplan 配置，需要系统 Python3/PyYAML、Netplan 和 systemd；其他运行时或厂商 Netplan 配置来源需先人工整理。
+
+DNS 修改先备份并创建两分钟自动恢复任务，应用失败或验证失败恢复原配置，成功后取消恢复任务。Tailscale 下载及安装前再次检查冲突网段、有效上游 DNS，以及 tailscale.com 和 pkgs.tailscale.com 解析；修改失败、选择不修改但冲突仍存在、无法验证或解析失败均停止安装。公共 DNS 无法替代云厂商内部专用域名解析；备份路径和恢复命令会在操作时显示。
+
 快捷查询：`lts-tool tailscale`，直接显示 `tailscale status` 的原始输出并保留退出码，不进入菜单，不修改配置。
 
 Tailscale 菜单第 9 项分为「正常登录/恢复连接」和「强制重新授权」。普通连接在已登录时不会产生新链接，但会明确显示完成状态；强制重新授权会重新请求浏览器授权，需要在 VNC 或已验证可用的公网 SSH 中执行，脚本会阻止检测到的 Tailscale SSH 会话发起此操作。

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.14 — 2026-10-03
+
+- Ubuntu Netplan DNS 修改禁用 cloud-init 网络再生成，关闭 DHCP 下发 DNS，保留地址、路由及 DHCP 分配。
+- 增加 DNS 备份、失败恢复及两分钟自动恢复定时器，验证通过后取消。
+- Tailscale 安装前强制验证：DNS 修改失败、冲突仍存在、无法读取上游或域名解析失败均停止安装。
+
 ## 1.0.13 — 2026-10-03
 
 - 新增 `lts-tool tailscale` 快捷命令，直接查询 `tailscale status`，保留原始输出和退出码。

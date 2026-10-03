@@ -6,7 +6,7 @@ set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 umask 077
-VERSION=1.0.13
+VERSION=1.0.14
 BASE=/var/lib/linux-server-tool
 SELF=/usr/local/sbin/lts-tool
 KEY_CONFIG=/etc/lts-tool/root_authorized_keys
@@ -860,6 +860,96 @@ dns_check() {
     done < <(dns_addresses)
     if ((conflict)); then dns_menu; fi
 }
+dns_has_conflict() {
+    local addr second addresses upstream=0
+    addresses=$(dns_addresses) || return 2
+    [[ -n $addresses ]] || return 2
+    while IFS= read -r addr; do
+        [[ $addr == 127.* || $addr == 0.0.0.0 ]] || upstream=1
+        [[ $addr == 100.* ]] || continue
+        [[ $addr != 100.100.100.100 ]] || ! systemctl is-active --quiet tailscaled || continue
+        second=${addr#100.}; second=${second%%.*}
+        if ((10#$second >= 64 && 10#$second <= 127)); then return 0; fi
+    done <<< "$addresses"
+    ((upstream)) || return 2
+    return 1
+}
+dns_verify_safe() {
+    local rc
+    if dns_has_conflict; then
+        say '仍检测到冲突内网 DNS，验证失败。'; return 1
+    else rc=$?; fi
+    [[ $rc == 1 ]] || { say '无法读取有效 DNS，验证失败。'; return 1; }
+    timeout 20 getent ahosts tailscale.com >/dev/null || return 1
+    timeout 20 getent ahosts pkgs.tailscale.com >/dev/null || return 1
+}
+# Edit only DNS fields; retain DHCP, addresses, routes, matches and interface names.
+netplan_write_dns() {
+    /usr/bin/python3 - "$1" "$2" <<'PY'
+import pathlib, sys, yaml, os
+root, servers = pathlib.Path(sys.argv[1]), sys.argv[2].split()
+updates = []
+for path in sorted(root.glob('*.yaml')):
+    if path.is_symlink():
+        raise SystemExit('Netplan symlinks are unsupported')
+    data = yaml.safe_load(path.read_text())
+    if not isinstance(data, dict) or not isinstance(data.get('network'), dict):
+        raise SystemExit('Invalid Netplan configuration')
+    changed = False
+    for kind in ('ethernets', 'wifis', 'bridges', 'bonds', 'vlans'):
+        for name, cfg in (data['network'].get(kind) or {}).items():
+            if name == 'tailscale0':
+                continue
+            if not isinstance(cfg, dict):
+                raise SystemExit('Invalid interface configuration')
+            cfg.setdefault('nameservers', {})['addresses'] = servers
+            # Matching DHCP4/6 overrides also satisfy networkd dual-stack rules.
+            for version in (4, 6):
+                cfg.setdefault(f'dhcp{version}-overrides', {})['use-dns'] = False
+            changed = True
+    if changed:
+        updates.append((path, yaml.safe_dump(data, sort_keys=False)))
+if not updates:
+    raise SystemExit('No configurable Netplan interfaces found')
+for path, content in updates:
+    staged = path.with_name(path.name + '.lts-tmp')
+    staged.write_text(content)
+    staged.chmod(0o600)
+    os.replace(staged, path)
+PY
+}
+change_netplan_dns() {
+    local servers=$1 backup=$2 cfg=/etc/cloud/cloud.cfg.d/99-lts-tool-network.cfg timer
+    need netplan; need systemd-run
+    /usr/bin/python3 -c 'import yaml' || return 1
+    [[ ! -L /etc/netplan && ! -L $cfg ]] || return 1
+    # Runtime/vendor overlays may override /etc; do not claim persistence there.
+    local overlay
+    for overlay in /run/netplan/*.yaml /lib/netplan/*.yaml; do
+        [[ ! -e $overlay ]] || { say "存在其他 Netplan 配置来源：$overlay；请先人工整理。"; return 1; }
+    done
+    cp -a /etc/netplan "$backup/netplan" || return 1
+    printf 'cp -a %q/. /etc/netplan/\n' "$backup/netplan" >> "$backup/restore.sh"
+    install -d -m 755 /etc/cloud/cloud.cfg.d
+    if [[ -e $cfg ]]; then
+        cp -a "$cfg" "$backup/cloud-network.cfg" || return 1
+        printf 'cp -a %q %q\n' "$backup/cloud-network.cfg" "$cfg" >> "$backup/restore.sh"
+    else printf 'rm -f %q\n' "$cfg" >> "$backup/restore.sh"; fi
+    printf 'netplan generate\nnetplan apply\n' >> "$backup/restore.sh"
+    chmod 700 "$backup/restore.sh"
+    timer=lts-dns-rollback-${backup##*/}
+    # Restore even if applying the network configuration disconnects this shell.
+    systemd-run --unit="$timer" --on-active=120s /bin/bash "$backup/restore.sh" || return 1
+    if netplan_write_dns /etc/netplan "$servers" &&
+       printf 'network: {config: disabled}\n' > "$cfg" &&
+       chmod 600 "$cfg" && netplan generate && timeout --kill-after=5s 60s netplan apply && dns_verify_safe; then
+        systemctl stop "$timer.timer" || return 1
+    else
+        bash "$backup/restore.sh" || return 1
+        systemctl stop "$timer.timer" || true
+        return 1
+    fi
+}
 change_dns() (
     local servers=$1 backup uuid dev
     backup=$BASE/dns-$(date +%s)-$RANDOM
@@ -868,7 +958,13 @@ change_dns() (
     printf '#!/usr/bin/env bash\nset -eu\n' > "$backup/restore.sh"
     say "DNS 备份：$backup；恢复命令：bash $backup/restore.sh"
     trap 'rc=$?; trap - ERR; say "DNS 修改失败，尝试恢复原配置。"; bash "$backup/restore.sh" || true; exit "$rc"' ERR
-    if systemctl is-active --quiet NetworkManager; then
+    if command -v netplan >/dev/null && [[ -d /etc/netplan ]]; then
+        if ! change_netplan_dns "$servers" "$backup"; then
+            say 'Netplan DNS 修改失败，恢复原配置。'
+            bash "$backup/restore.sh" || true
+            return 1
+        fi
+    elif systemctl is-active --quiet NetworkManager; then
         need nmcli
         while IFS=: read -r uuid dev; do
             [[ -n $dev && $dev != lo && $dev != tailscale0 ]] || continue
@@ -898,7 +994,7 @@ change_dns() (
         return 1
     fi
     chmod 700 "$backup/restore.sh"
-    if ! timeout 20 getent ahosts tailscale.com >/dev/null; then
+    if ! dns_verify_safe; then
         say 'DNS 验证失败，恢复原配置。'
         bash "$backup/restore.sh"
         return 1
@@ -964,7 +1060,8 @@ tailscale_install_login() {
     fi
 }
 tailscale_install() {
-    dns_check
+    dns_check || die 'DNS 检测或修改失败，已停止安装 Tailscale。'
+    dns_verify_safe || die 'DNS 前置验证失败，已停止安装 Tailscale；请先修复 DNS。'
     if ! command -v curl >/dev/null; then
         if command -v apt-get >/dev/null; then
             apt-get update

@@ -19,6 +19,7 @@ jobs:
           bash test-health.sh
           bash test-bbr.sh
           bash test-shortcut.sh
+          bash test-dns.sh
   sshd-integration:
     runs-on: ubuntu-latest
     strategy:
