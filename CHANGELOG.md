@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.16 — 2026-10-04
+
+- networkd 环境通过 Netplan generate 生成配置，直接 reload/reconfigure，避免 apply 的网卡重命名及多次 DHCP 中断。
+- 为默认路由网卡实际加载的 Netplan network 文件添加持久 DNS 覆盖，关闭 DHCP DNS，并刷新 resolved 运行时 DNS。
+- 回退同时恢复持久覆盖并撤销运行时 DNS，新增生成文件 DNS 校验与覆盖/回退测试。
+
+## 1.0.15 — 2026-10-03
+
+- Netplan 应用后重载 systemd-networkd 配置并重新配置默认路由网卡，等待上游 DNS 更新后验证。
+- 自动恢复等待延长至三分钟，覆盖网络应用及 DNS 收敛验证。
+
 ## 1.0.14 — 2026-10-03
 
 - Ubuntu Netplan DNS 修改禁用 cloud-init 网络再生成，关闭 DHCP 下发 DNS，保留地址、路由及 DHCP 分配。

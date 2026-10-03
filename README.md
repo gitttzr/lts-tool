@@ -50,7 +50,7 @@ sudo nano /etc/lts-tool/root_authorized_keys
 
 1.0.14 修复 Ubuntu 阿里云 ECS 自动下发 DNS：按[阿里云官方文档](https://help.aliyun.com/zh/ecs/ubuntu-system-configuration-custom-dns-server)，通过 cloud.cfg.d 禁用 cloud-init 网络配置再生成，并修改现有 Netplan 的自定义 nameservers 和 DHCP use-dns；保留 IP、路由、网卡匹配及 DHCP 获取地址。无需改为静态 IP。适用于标准 /etc/netplan 配置，需要系统 Python3/PyYAML、Netplan 和 systemd；其他运行时或厂商 Netplan 配置来源需先人工整理。
 
-DNS 修改先备份并创建两分钟自动恢复任务，应用失败或验证失败恢复原配置，成功后取消恢复任务。Tailscale 下载及安装前再次检查冲突网段、有效上游 DNS，以及 tailscale.com 和 pkgs.tailscale.com 解析；修改失败、选择不修改但冲突仍存在、无法验证或解析失败均停止安装。公共 DNS 无法替代云厂商内部专用域名解析；备份路径和恢复命令会在操作时显示。
+DNS 修改先备份并创建三分钟自动恢复任务，应用失败或验证失败恢复原配置，成功后取消恢复任务。Tailscale 下载及安装前再次检查冲突网段、有效上游 DNS，以及 tailscale.com 和 pkgs.tailscale.com 解析；修改失败、选择不修改但冲突仍存在、无法验证或解析失败均停止安装。公共 DNS 无法替代云厂商内部专用域名解析；备份路径和恢复命令会在操作时显示。
 
 快捷查询：`lts-tool tailscale`，直接显示 `tailscale status` 的原始输出并保留退出码，不进入菜单，不修改配置。
 
@@ -220,3 +220,7 @@ CI 另外在 Ubuntu 22.04/24.04 隔离容器中重现 `/run/sshd` 缺失，并�
 - [OpenSSH 密钥生成](https://man.openbsd.org/ssh-keygen)
 - [Google Public DNS](https://developers.google.com/speed/public-dns/docs/using)
 - [腾讯 DNSPod Public DNS](https://docs.dnspod.com/public-dns/public-dns-guide/)
+
+1.0.15 在 Netplan 应用后重载 systemd-networkd，并重新配置应用前记录的默认路由网卡；等待最多约 30 秒让上游 DNS 更新后再执行解析验证。仍失败则恢复并阻止安装。
+
+1.0.16 在 networkd 环境下只生成 Netplan 配置，再重载/重新配置网卡，避免 netplan apply 的重命名步骤。根据 networkctl 显示的实际 Netplan network 文件，写入 /etc/systemd/network 下的独立 DNS drop-in，重启后仍屏蔽 DHCP DNS；同时刷新 resolved 的运行时 DNS。失败时恢复 drop-in 并撤销运行时设置。

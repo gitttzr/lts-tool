@@ -6,7 +6,7 @@ set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 umask 077
-VERSION=1.0.14
+VERSION=1.0.16
 BASE=/var/lib/linux-server-tool
 SELF=/usr/local/sbin/lts-tool
 KEY_CONFIG=/etc/lts-tool/root_authorized_keys
@@ -17,6 +17,7 @@ HEALTH_STATE=/run/lts-tool-health
 BBR_SYSCTL=/etc/sysctl.d/99-lts-tool-bbr.conf
 BBR_MODULES=/etc/modules-load.d/lts-tool-bbr.conf
 BBR_SERVICE=/etc/systemd/system/lts-tool-bbr.service
+NETWORKD_CONFIG=/etc/systemd/network
 
 bbr_status() {
     say "当前 TCP 拥塞控制：$(sysctl -n net.ipv4.tcp_congestion_control)"
@@ -883,6 +884,66 @@ dns_verify_safe() {
     timeout 20 getent ahosts tailscale.com >/dev/null || return 1
     timeout 20 getent ahosts pkgs.tailscale.com >/dev/null || return 1
 }
+dns_wait_safe() {
+    local attempt rc
+    # networkd/resolved update link DNS asynchronously after reconfiguration.
+    for ((attempt=0; attempt<15; attempt++)); do
+        if dns_has_conflict; then rc=0; else rc=$?; fi
+        if [[ $rc == 1 ]]; then dns_verify_safe; return $?; fi
+        sleep 2
+    done
+    dns_verify_safe
+}
+networkd_dns_override() {
+    local dev=$1 servers=$2 backup=$3 file name cfg old addr
+    file=$(networkctl status "$dev" --no-pager --full | awk '$1=="Network" && $2=="File:" {print $3}') || return 1
+    name=${file##*/}
+    [[ $file == /run/systemd/network/* && $name == *netplan*.network && $name =~ ^[a-zA-Z0-9_.:-]+$ ]] || {
+        say "无法确认 $dev 加载的 Netplan 文件：$file"; return 1;
+    }
+    cfg=$NETWORKD_CONFIG/$name.d/90-lts-tool-dns.conf
+    [[ ! -L ${cfg%/*} && ! -L $cfg ]] || return 1
+    old=$backup/$name.dns-original
+    if [[ -f $cfg ]]; then
+        cp -a "$cfg" "$old" || return 1
+        printf 'cp -a %q %q\n' "$old" "$cfg" >> "$backup/restore.sh"
+    else printf 'rm -f %q\n' "$cfg" >> "$backup/restore.sh"; fi
+    printf 'resolvectl revert %q\nnetworkctl reload\nnetworkctl reconfigure %q\n' "$dev" "$dev" >> "$backup/restore.sh"
+    install -d -m 755 "${cfg%/*}" || return 1
+    {
+        printf '[Network]\nDNS=\n'
+        for addr in $servers; do printf 'DNS=%s\n' "$addr"; done
+        printf '\n[DHCP]\nUseDNS=false\n\n[DHCPv4]\nUseDNS=false\n\n[DHCPv6]\nUseDNS=false\n'
+    } > "$cfg" || return 1
+    chmod 644 "$cfg"
+}
+netplan_apply_dns() {
+    local servers=$1 backup=$2 dev found=0 uplinks
+    uplinks=$(ip -o route show default | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | sort -u) || return 1
+    if systemctl is-active --quiet systemd-networkd; then
+        # Apply DNS to the currently loaded file without running Netplan's
+        # link rename/rebind steps; those unnecessarily disrupt DHCP on ECS.
+        need resolvectl
+        while IFS= read -r dev; do
+            [[ -n $dev && $dev != tailscale0 && $dev != lo && $dev != docker* && $dev != veth* && $dev != br-* ]] || continue
+            networkd_dns_override "$dev" "$servers" "$backup" || return 1
+        done <<< "$uplinks"
+        # Reload generated .network files before explicitly refreshing uplinks.
+        timeout 10 networkctl reload || return 1
+        while IFS= read -r dev; do
+            [[ -n $dev && $dev != tailscale0 && $dev != lo && $dev != docker* && $dev != veth* && $dev != br-* ]] || continue
+            timeout 15 networkctl reconfigure "$dev" || return 1
+            local -a dns_servers
+            read -r -a dns_servers <<< "$servers"
+            timeout 10 resolvectl dns "$dev" "${dns_servers[@]}" || return 1
+            found=1
+        done <<< "$uplinks"
+        ((found)) || { say '未找到可重新配置的默认路由网卡。'; return 1; }
+    else
+        timeout --kill-after=5s 60s netplan apply || return 1
+    fi
+    dns_wait_safe
+}
 # Edit only DNS fields; retain DHCP, addresses, routes, matches and interface names.
 netplan_write_dns() {
     /usr/bin/python3 - "$1" "$2" <<'PY'
@@ -935,14 +996,16 @@ change_netplan_dns() {
         cp -a "$cfg" "$backup/cloud-network.cfg" || return 1
         printf 'cp -a %q %q\n' "$backup/cloud-network.cfg" "$cfg" >> "$backup/restore.sh"
     else printf 'rm -f %q\n' "$cfg" >> "$backup/restore.sh"; fi
-    printf 'netplan generate\nnetplan apply\n' >> "$backup/restore.sh"
+    if systemctl is-active --quiet systemd-networkd; then
+        printf 'netplan generate\nnetworkctl reload\n' >> "$backup/restore.sh"
+    else printf 'netplan generate\nnetplan apply\n' >> "$backup/restore.sh"; fi
     chmod 700 "$backup/restore.sh"
     timer=lts-dns-rollback-${backup##*/}
     # Restore even if applying the network configuration disconnects this shell.
-    systemd-run --unit="$timer" --on-active=120s /bin/bash "$backup/restore.sh" || return 1
+    systemd-run --unit="$timer" --on-active=180s /bin/bash "$backup/restore.sh" || return 1
     if netplan_write_dns /etc/netplan "$servers" &&
        printf 'network: {config: disabled}\n' > "$cfg" &&
-       chmod 600 "$cfg" && netplan generate && timeout --kill-after=5s 60s netplan apply && dns_verify_safe; then
+       chmod 600 "$cfg" && netplan generate && netplan_apply_dns "$servers" "$backup"; then
         systemctl stop "$timer.timer" || return 1
     else
         bash "$backup/restore.sh" || return 1
