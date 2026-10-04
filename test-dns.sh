@@ -98,3 +98,72 @@ echo 'PASS: asynchronous DNS wait and explicit networkd uplink reconfiguration'
     if networkd_dns_override eth0 '223.5.5.5' "$work"; then exit 1; fi
 )
 echo 'PASS: persistent loaded-file DNS override, rollback and unsupported-file refusal'
+netplan_auto_dns "$work/netplan"
+/usr/bin/python3 - "$work/netplan/50-cloud-init.yaml" <<'PY'
+import sys, yaml
+c = yaml.safe_load(open(sys.argv[1]))['network']['ethernets']['eth0']
+assert c['dhcp4'] and c['dhcp6']
+assert 'addresses' not in c['nameservers']
+assert c['nameservers']['search'] == ['internal.example']
+assert c['dhcp4-overrides'] == {'route-metric': 100, 'use-dns': True}
+assert c['dhcp6-overrides']['use-dns'] is True
+assert c['routes'][0]['via'] == '10.0.0.1'
+PY
+cp "$work/netplan/50-cloud-init.yaml" "$work/auto-expected"
+netplan_auto_dns "$work/netplan"
+cmp "$work/auto-expected" "$work/netplan/50-cloud-init.yaml"
+if command -v netplan >/dev/null; then
+    cp "$work/netplan/50-cloud-init.yaml" "$work/root/etc/netplan/"
+    netplan generate --root-dir "$work/root"
+    ! grep -q '^DNS=' "$work/root/run/systemd/network/10-netplan-eth0.network"
+    ! grep -qx 'UseDNS=false' "$work/root/run/systemd/network/10-netplan-eth0.network"
+fi
+mkdir "$work/static"
+printf 'network:\n  version: 2\n  ethernets:\n    eth0:\n      dhcp4: false\n      addresses: [192.0.2.1/24]\n' > "$work/static/static.yaml"
+cp "$work/static/static.yaml" "$work/static-original"
+if netplan_auto_dns "$work/static" 2>/dev/null; then exit 1; fi
+cmp "$work/static-original" "$work/static/static.yaml"
+echo 'PASS: restore DHCP DNS, preserve routing/search, repeat safely, generated config, refuse static-only setup'
+(
+    mkdir -p "$work/sys/eth0" "$work/leases"
+    echo 2 > "$work/sys/eth0/ifindex"
+    echo 'DNS=100.100.2.136 100.100.2.138' > "$work/leases/2"
+    resolvectl() { echo 'Link 2 (eth0): 119.29.29.29 223.5.5.5'; }
+    if dhcp_dns_verified eth0 "$work/leases" "$work/sys"; then exit 1; fi
+    resolvectl() { echo 'Link 2 (eth0): 100.100.2.138 100.100.2.136'; }
+    dhcp_dns_verified eth0 "$work/leases" "$work/sys"
+    rm "$work/leases/2"
+    if dhcp_dns_verified eth0 "$work/leases" "$work/sys"; then exit 1; fi
+)
+echo 'PASS: default DNS must match actual DHCP lease, stale public DNS and missing lease rejected'
+(
+    echo 'DNS=100.100.2.136 100.100.2.138' > "$work/leases/2"
+    timeout() { shift; "$@"; }
+    resolvectl() { [[ $* == 'dns eth0 100.100.2.136 100.100.2.138' ]]; }
+    dhcp_dns_refresh eth0 "$work/leases" "$work/sys"
+    echo 'DNS=invalid' > "$work/leases/2"
+    if dhcp_dns_refresh eth0 "$work/leases" "$work/sys"; then exit 1; fi
+)
+echo 'PASS: refresh link DNS from actual lease, reject invalid lease addresses'
+(
+    NETPLAN_RUNTIME=$work/generated
+    netplan() {
+        [[ $(umask) == 0022 ]]
+        mkdir -p "$NETPLAN_RUNTIME"
+        echo '[Network]' > "$NETPLAN_RUNTIME/10-netplan-eth0.network"
+        chmod 600 "$NETPLAN_RUNTIME/10-netplan-eth0.network"
+    }
+    chown() { [[ $1 == root:systemd-network ]]; }
+    runuser() { [[ $(stat -c %a "$NETPLAN_RUNTIME/10-netplan-eth0.network") == 640 ]]; }
+    umask 077
+    netplan_generate
+    [[ $(stat -c %a "$NETPLAN_RUNTIME") == 755 ]]
+    [[ $(stat -c %a "$NETPLAN_RUNTIME/10-netplan-eth0.network") == 640 ]]
+    [[ $(umask) == 0077 ]]
+)
+echo 'PASS: restrictive parent umask, generated network permissions, service readability check, parent umask preserved'
+echo 'DNS=100.100.2.136 100.100.2.138' > "$work/leases/2"
+dhcp_dns_conflicts eth0 "$work/leases" "$work/sys"
+echo 'DNS=183.60.83.19 183.60.82.98' > "$work/leases/2"
+if dhcp_dns_conflicts eth0 "$work/leases" "$work/sys"; then exit 1; fi
+echo 'PASS: cloud DHCP/Tailscale conflict preflight distinguishes Alibaba DNS and Tencent VPC DNS'

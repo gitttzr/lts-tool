@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.0.23 — 2026-10-04
+
+- 恢复默认 DNS 前检查 DHCP 默认 DNS 与运行中 Tailscale 的网段冲突；冲突时不修改，提示通过公网/VNC 停止 Tailscale 后恢复，不自动停服务。
+
+## 1.0.22 — 2026-10-04
+
+- Netplan 生成使用独立 umask 022，规范生成 network/link 配置权限并检查 systemd-network 可读性；恢复脚本同样使用该路径。
+- 默认 DNS 恢复区分 DHCP 比对与内网解析验证失败；按指定网卡执行 A 查询，避免全局公共 DNS 造成误判。
+
+## 1.0.21 — 2026-10-04
+
+- 恢复默认 DNS 同时备份并移除 /run/systemd/resolved.conf.d/99-temporary-dns.conf，消除临时全局公共 DNS 覆盖，失败时恢复该文件。
+
+## 1.0.20 — 2026-10-04
+
+- 默认 DNS 恢复时续租 DHCP，并在租约 DNS 未发布到 resolved 网卡时按实际租约刷新；成功输出只展示目标网卡 DNS。
+- 明确保留其他来源的 resolved 全局 DNS，避免混入全局公共 DNS 误导恢复结果。
+
+## 1.0.19 — 2026-10-04
+
+- 默认 DNS 恢复必须核对默认路由网卡的 DHCP 租约 DNS 与 resolved 实际网卡 DNS 一致；公共 DNS 残留或租约不可读不再误报成功。
+
+## 1.0.18 — 2026-10-04
+
+- DNS 菜单第 4 项恢复云平台 DHCP 自动下发 DNS，清理本工具 Netplan 公共 DNS、networkd/resolved 覆盖及 cloud-init 禁用文件。
+- 操作前备份并设置三分钟回退，验证失败恢复；保留 IP、路由及第三方 cloud-init 配置，静态 IP 不自动切换为 DHCP。
+
 ## 1.0.17 — 2026-10-04
 
 - SSH 第 1 项发现长期公钥配置为空时直接提示输入，验证保存后继续安装；错误输入可重试，留空取消。

@@ -1,5 +1,7 @@
 # Linux 服务器工具
 
+1.0.21：恢复默认 DNS 会同时备份、移除 `/run/systemd/resolved.conf.d/99-temporary-dns.conf` 临时全局覆盖；失败时还原。其他自定义 resolved 配置仍保留。若外部程序重新生成该文件，需另行处理其来源。
+
 提供 Tailscale、SSH、临时维护密钥、更新工具、健康守护和谷歌 BBR 六个主菜单，各有子菜单。脚本文件：`linux-server-tool.sh`。
 
 ## 谷歌 BBR（1.0.11）
@@ -47,6 +49,8 @@ sudo nano /etc/lts-tool/root_authorized_keys
 ## 菜单
 
 **Tailscale：**官方安装/更新最新稳定版、DNS 检测与修改、SSH 私网/公网切换、修改 Tailscale 主机名、服务自启与自动重启、状态、登录授权。
+
+1.0.18 起，进入 **Tailscale → 3）修改公共 DNS → 4）恢复云平台默认内网 DNS**，恢复 Ubuntu Netplan/networkd 的 DHCP DNS，适用于阿里云 ECS 和同类腾讯云 CVM 配置。不硬编码厂商 DNS 地址，由 DHCP 实际下发。清除公共 DNS 设置及本工具创建的 networkd/resolved/cloud-init 覆盖；其他来源的 cloud-init 禁用设置保留。保留 DHCP/IP/路由，静态地址不自动改为 DHCP。恢复前备份，三分钟自动回退，验证成功取消。恢复后默认 DNS 若与 Tailscale 冲突，安装前检查仍会阻止安装。
 
 1.0.14 修复 Ubuntu 阿里云 ECS 自动下发 DNS：按[阿里云官方文档](https://help.aliyun.com/zh/ecs/ubuntu-system-configuration-custom-dns-server)，通过 cloud.cfg.d 禁用 cloud-init 网络配置再生成，并修改现有 Netplan 的自定义 nameservers 和 DHCP use-dns；保留 IP、路由、网卡匹配及 DHCP 获取地址。无需改为静态 IP。适用于标准 /etc/netplan 配置，需要系统 Python3/PyYAML、Netplan 和 systemd；其他运行时或厂商 Netplan 配置来源需先人工整理。
 
@@ -226,3 +230,11 @@ CI 另外在 Ubuntu 22.04/24.04 隔离容器中重现 `/run/sshd` 缺失，并�
 1.0.15 在 Netplan 应用后重载 systemd-networkd，并重新配置应用前记录的默认路由网卡；等待最多约 30 秒让上游 DNS 更新后再执行解析验证。仍失败则恢复并阻止安装。
 
 1.0.16 在 networkd 环境下只生成 Netplan 配置，再重载/重新配置网卡，避免 netplan apply 的重命名步骤。根据 networkctl 显示的实际 Netplan network 文件，写入 /etc/systemd/network 下的独立 DNS drop-in，重启后仍屏蔽 DHCP DNS；同时刷新 resolved 的运行时 DNS。失败时恢复 drop-in 并撤销运行时设置。
+
+1.0.19 默认 DNS 恢复还要求实际网卡 DNS 与 networkd DHCP 租约下发的 DNS 一致；无法读取租约或残留其他 DNS 时回退，不再仅凭域名能解析判断成功。
+
+1.0.20 恢复默认 DNS 增加 DHCP 续租；租约已提供 DNS 而网卡未更新时，按实际租约刷新 resolved 网卡 DNS。保留其他来源的全局 DNS 配置，成功输出区分网卡 DNS 和全局 DNS。
+
+1.0.22：Netplan 生成在独立 umask 022 下运行，生成 network/link 文件限定为 root:systemd-network 640，并检查 networkd 服务用户可读。回退生成同样处理。默认 DNS 验证区分租约不一致与指定网卡解析超时；网络安全策略阻止内网 DNS 时仍回退，不伪报成功。
+
+1.0.23：恢复默认 DNS 前读取 DHCP 租约，若默认 DNS 位于 100.64.0.0/10 且 tailscaled 正运行，则阻止修改。需从公网 SSH/VNC 停止 Tailscale 后再恢复；脚本不自动停服务。恢复默认 DNS 后再次开启 Tailscale 仍可能导致内网 DNS 不可达。

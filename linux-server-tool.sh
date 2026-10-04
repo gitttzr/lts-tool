@@ -6,7 +6,7 @@ set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 umask 077
-VERSION=1.0.17
+VERSION=1.0.23
 BASE=/var/lib/linux-server-tool
 SELF=/usr/local/sbin/lts-tool
 KEY_CONFIG=/etc/lts-tool/root_authorized_keys
@@ -967,11 +967,31 @@ netplan_apply_dns() {
         done <<< "$uplinks"
         ((found)) || { say '未找到可重新配置的默认路由网卡。'; return 1; }
     else
-        timeout --kill-after=5s 60s netplan apply || return 1
+        (umask 022; timeout --kill-after=5s 60s netplan apply) || return 1
     fi
     dns_wait_safe
 }
 # Edit only DNS fields; retain DHCP, addresses, routes, matches and interface names.
+netplan_generate() (
+    # The toolbox's private-file umask must not make generated network files
+    # unreadable by the unprivileged systemd-network service account.
+    umask 022
+    netplan generate || return 1
+    local file root=${NETPLAN_RUNTIME:-/run/systemd/network}
+    [[ ! -L $root ]] || return 1
+    [[ ! -d $root ]] || chmod 755 "$root" || return 1
+    for file in "$root"/*netplan*.network "$root"/*netplan*.link; do
+        [[ -e $file ]] || continue
+        [[ -f $file && ! -L $file ]] || return 1
+        chown root:systemd-network "$file" || return 1
+        chmod 640 "$file" || return 1
+        if command -v runuser >/dev/null; then
+            runuser -u systemd-network -- test -r "$file" || {
+                say "networkd 无法读取生成配置：$file"; return 1;
+            }
+        fi
+    done
+)
 netplan_write_dns() {
     /usr/bin/python3 - "$1" "$2" <<'PY'
 import pathlib, sys, yaml, os
@@ -1024,15 +1044,15 @@ change_netplan_dns() {
         printf 'cp -a %q %q\n' "$backup/cloud-network.cfg" "$cfg" >> "$backup/restore.sh"
     else printf 'rm -f %q\n' "$cfg" >> "$backup/restore.sh"; fi
     if systemctl is-active --quiet systemd-networkd; then
-        printf 'netplan generate\nnetworkctl reload\n' >> "$backup/restore.sh"
-    else printf 'netplan generate\nnetplan apply\n' >> "$backup/restore.sh"; fi
+        printf '/bin/bash %q --netplan-generate\nnetworkctl reload\n' "$SELF" >> "$backup/restore.sh"
+    else printf '/bin/bash %q --netplan-generate\n(umask 022; netplan apply)\n' "$SELF" >> "$backup/restore.sh"; fi
     chmod 700 "$backup/restore.sh"
     timer=lts-dns-rollback-${backup##*/}
     # Restore even if applying the network configuration disconnects this shell.
     systemd-run --unit="$timer" --on-active=180s /bin/bash "$backup/restore.sh" || return 1
     if netplan_write_dns /etc/netplan "$servers" &&
        printf 'network: {config: disabled}\n' > "$cfg" &&
-       chmod 600 "$cfg" && netplan generate && netplan_apply_dns "$servers" "$backup"; then
+       chmod 600 "$cfg" && netplan_generate && netplan_apply_dns "$servers" "$backup"; then
         systemctl stop "$timer.timer" || return 1
     else
         bash "$backup/restore.sh" || return 1
@@ -1092,14 +1112,163 @@ change_dns() (
     say "DNS 已修改。恢复命令：bash $backup/restore.sh"
     say '公共 DNS 无法解析云厂商专用内部域名；如依赖这些域名，请恢复原配置并另配分流。'
 )
+netplan_auto_dns() {
+    /usr/bin/python3 - "$1" <<'PY'
+import pathlib, sys, yaml, os
+updates = []
+count = 0
+for path in sorted(pathlib.Path(sys.argv[1]).glob('*.yaml')):
+    if path.is_symlink():
+        raise SystemExit('Netplan symlinks are unsupported')
+    data = yaml.safe_load(path.read_text())
+    for kind in ('ethernets', 'wifis', 'bridges', 'bonds', 'vlans'):
+        for name, cfg in (data.get('network', {}).get(kind) or {}).items():
+            if name == 'tailscale0' or not (cfg.get('dhcp4') or cfg.get('dhcp6')):
+                continue
+            count += 1
+            if 'nameservers' in cfg:
+                cfg['nameservers'].pop('addresses', None)
+            for version in (4, 6):
+                cfg.setdefault(f'dhcp{version}-overrides', {})['use-dns'] = True
+    updates.append((path, yaml.safe_dump(data, sort_keys=False)))
+if not count:
+    raise SystemExit('No DHCP-enabled interface; static IP configuration was not changed')
+for path, content in updates:
+    staged = path.with_name(path.name + '.lts-tmp')
+    staged.write_text(content)
+    staged.chmod(0o600)
+    os.replace(staged, path)
+PY
+}
+dhcp_dns_verified() {
+    local dev=$1 index expected actual lease_root=${2:-/run/systemd/netif/leases} sys_root=${3:-/sys/class/net}
+    [[ $dev =~ ^[a-zA-Z0-9_.:-]+$ ]] || return 1
+    read -r index < "$sys_root/$dev/ifindex" || return 1
+    [[ $index =~ ^[0-9]+$ ]] || return 1
+    [[ -r $lease_root/$index ]] || return 1
+    expected=$(awk -F= '$1=="DNS" {print $2}' "$lease_root/$index" | tr ' ' '\n' | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' | sort -u) || return 1
+    [[ -n $expected ]] || return 1
+    actual=$(resolvectl dns "$dev" | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | sort -u) || return 1
+    [[ $actual == "$expected" ]]
+}
+dhcp_dns_refresh() {
+    local dev=$1 index values lease_root=${2:-/run/systemd/netif/leases} sys_root=${3:-/sys/class/net}
+    local -a servers
+    [[ $dev =~ ^[a-zA-Z0-9_.:-]+$ ]] || return 1
+    read -r index < "$sys_root/$dev/ifindex" || return 1
+    [[ $index =~ ^[0-9]+$ && -r $lease_root/$index ]] || return 1
+    values=$(awk -F= '$1=="DNS" {print $2}' "$lease_root/$index")
+    read -r -a servers <<< "$values"
+    ((${#servers[@]})) || return 1
+    local server
+    for server in "${servers[@]}"; do
+        [[ $server =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    done
+    timeout 10 resolvectl dns "$dev" "${servers[@]}"
+}
+dhcp_dns_conflicts() {
+    local dev=$1 index addr second values lease_root=${2:-/run/systemd/netif/leases} sys_root=${3:-/sys/class/net}
+    [[ $dev =~ ^[a-zA-Z0-9_.:-]+$ ]] || return 1
+    read -r index < "$sys_root/$dev/ifindex" || return 1
+    [[ $index =~ ^[0-9]+$ && -r $lease_root/$index ]] || return 1
+    values=$(awk -F= '$1=="DNS" {print $2}' "$lease_root/$index")
+    for addr in $values; do
+        [[ $addr =~ ^100\.([0-9]{1,3})\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || continue
+        second=${BASH_REMATCH[1]}
+        if ((10#$second >= 64 && 10#$second <= 127)); then return 0; fi
+    done
+    return 1
+}
+dns_restore_default() (
+    need netplan; need networkctl; need resolvectl; need systemd-run
+    systemctl is-active --quiet systemd-networkd || die '此功能当前支持 Ubuntu Netplan/networkd 的云平台 DHCP DNS。'
+    /usr/bin/python3 -c 'import yaml' || die '缺少系统 PyYAML。'
+    local backup=$BASE/dns-default-$(date +%s)-$RANDOM timer dev file rel attempt addresses verified
+    local uplinks
+    uplinks=$(ip -o route show default | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | sort -u)
+    [[ -n $uplinks ]] || die '没有默认路由网卡。'
+    if systemctl is-active --quiet tailscaled.service; then
+        while IFS= read -r dev; do
+            if dhcp_dns_conflicts "$dev"; then
+                die 'DHCP 默认 DNS 与运行中的 Tailscale 地址段冲突，未修改 DNS。请通过公网 SSH 或 VNC 停止 Tailscale 后再恢复；不要在仅靠 Tailscale 的连接中停服务。'
+            fi
+        done <<< "$uplinks"
+    fi
+    install -d -m 700 "$backup"
+    cp -a /etc/netplan "$backup/netplan"
+    printf '#!/bin/bash\nset -eu\ncp -a %q/. /etc/netplan/\n' "$backup/netplan" > "$backup/restore.sh"
+    local -a overrides=()
+    for file in /etc/cloud/cloud.cfg.d/99-lts-tool-network.cfg /etc/systemd/resolved.conf.d/90-linux-server-tool.conf /run/systemd/resolved.conf.d/99-temporary-dns.conf "$NETWORKD_CONFIG"/*netplan*.network.d/90-lts-tool-dns.conf; do
+        [[ -e $file || -L $file ]] || continue
+        [[ -f $file && ! -L $file ]] || die "配置路径不支持：$file"
+        rel=${file#/}
+        cp -a --parents "$file" "$backup"
+        printf 'cp -a %q %q\n' "$backup/$rel" "$file" >> "$backup/restore.sh"
+        overrides+=("$file")
+    done
+    printf '/bin/bash %q --netplan-generate\nnetworkctl reload\nsystemctl restart systemd-resolved\n' "$SELF" >> "$backup/restore.sh"
+    while IFS= read -r dev; do
+        [[ $dev != tailscale0 && $dev != docker* && $dev != br-* && $dev != veth* ]] || die '默认路由来自虚拟网卡，请人工配置。'
+        printf 'resolvectl revert %q\nnetworkctl reconfigure %q\n' "$dev" "$dev" >> "$backup/restore.sh"
+    done <<< "$uplinks"
+    chmod 700 "$backup/restore.sh"
+    say "恢复前备份：$backup；撤销本次操作：bash $backup/restore.sh"
+    timer=lts-dns-default-${backup##*/}
+    systemd-run --unit="$timer" --on-active=180s /bin/bash "$backup/restore.sh"
+    trap 'rc=$?; trap - EXIT; if ((rc)); then bash "$backup/restore.sh" && systemctl stop "$timer.timer" || true; fi' EXIT
+    netplan_auto_dns /etc/netplan || exit 1
+    ((${#overrides[@]} == 0)) || rm -f -- "${overrides[@]}"
+    netplan_generate || exit 1
+    networkctl reload || exit 1
+    systemctl restart systemd-resolved || exit 1
+    while IFS= read -r dev; do
+        timeout 10 resolvectl revert "$dev" || exit 1
+        timeout 15 networkctl reconfigure "$dev" || exit 1
+        timeout 15 networkctl renew "$dev" || exit 1
+    done <<< "$uplinks"
+    for ((attempt=0; attempt<15; attempt++)); do
+        addresses=$(dns_addresses)
+        verified=1
+        while IFS= read -r dev; do
+            if ! dhcp_dns_verified "$dev"; then
+                dhcp_dns_refresh "$dev" || true
+                dhcp_dns_verified "$dev" || verified=0
+            fi
+        done <<< "$uplinks"
+        if ((verified)); then
+            # Test the restored link, not a global public resolver or cache.
+            resolvectl flush-caches || exit 1
+            while IFS= read -r dev; do
+                if ! timeout 12 resolvectl query --interface="$dev" --type=A aliyun.com >/dev/null; then
+                    say "$dev 的 DHCP DNS 已恢复，但通过该网卡解析 aliyun.com 失败；恢复操作前配置。"
+                    say '请检查内网 DNS 的 UDP/TCP 53 可达性、安全组及本机防火墙。'
+                    exit 1
+                fi
+            done <<< "$uplinks"
+            systemctl stop "$timer.timer" || exit 1
+            say '已恢复 DHCP 自动下发 DNS，移除本工具覆盖及 99-temporary-dns.conf 临时 DNS 覆盖。'
+            while IFS= read -r dev; do resolvectl dns "$dev"; done <<< "$uplinks"
+            say '其他来源的 resolved 全局 DNS 设置不自动删除，可用 resolvectl dns 查看。'
+            say '若其他文件也禁用了 cloud-init 网络配置，该设置仍保留。'
+            if dns_has_conflict; then say '默认 DNS 与 Tailscale 地址段重叠，后续安装仍会阻止，需重新选择公共 DNS。'; fi
+            exit 0
+        fi
+        sleep 2
+    done
+    say '实际网卡 DNS 未与 DHCP 租约一致，或无法读取租约；不判定为成功。'
+    while IFS= read -r dev; do resolvectl dns "$dev" || true; done <<< "$uplinks"
+    say '默认 DNS 恢复验证失败，恢复操作前配置。'
+    exit 1
+)
 dns_menu() {
     local choice
-    say 'DNS：1) 谷歌  2) 阿里云  3) 腾讯云  0) 不修改'
+    say 'DNS：1) 谷歌  2) 阿里云  3) 腾讯云  4) 恢复云平台默认内网 DNS（DHCP）  0) 不修改'
     read -r -p '请选择：' choice
     case $choice in
         1) change_dns '8.8.8.8 8.8.4.4';;
         2) change_dns '223.5.5.5 223.6.6.6';;
         3) change_dns '119.29.29.29';;
+        4) dns_restore_default;;
         0) say '保留当前 DNS。';;
         *) die '无效选择。';;
     esac
@@ -1288,6 +1457,7 @@ ssh_menu() {
 }
 main() {
     if [[ ${1:-} == --version ]]; then say "lts-tool $VERSION"; return; fi
+    if [[ ${1:-} == --netplan-generate ]]; then root_check; netplan_generate; return; fi
     if [[ ${1:-} == tailscale ]]; then
         (($# == 1)) || die '用法：lts-tool tailscale'
         need tailscale
