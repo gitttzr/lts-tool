@@ -3,6 +3,8 @@
 set -Eeuo pipefail
 source "$(dirname "$0")/linux-server-tool.sh"
 work=$(mktemp -d)
+TEMP_PREFIX_CONFIG=$work/temp-key-prefix
+echo lts > "$TEMP_PREFIX_CONFIG"
 trap 'rm -rf "$work"' EXIT
 CONF=$work/sshd_config
 cat > "$CONF" <<'EOF'

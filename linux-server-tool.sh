@@ -6,10 +6,11 @@ set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 umask 077
-VERSION=1.0.25
+VERSION=1.0.26
 BASE=/var/lib/linux-server-tool
 SELF=/usr/local/sbin/lts-tool
 KEY_CONFIG=/etc/lts-tool/root_authorized_keys
+TEMP_PREFIX_CONFIG=/etc/lts-tool/temp-key-prefix
 CONF=/etc/ssh/sshd_config
 BEGIN='# BEGIN LINUX-SERVER-TOOL'
 END='# END LINUX-SERVER-TOOL'
@@ -691,6 +692,14 @@ temp_key_publish() {
 }
 temp_key_file() {
     local dir=$1 id=${1##*/}
+    if [[ -e $dir/key-name || -L $dir/key-name ]]; then
+        local name
+        [[ -f $dir/key-name && ! -L $dir/key-name ]] || die '密钥文件名记录不正确。'
+        name=$(cat "$dir/key-name")
+        [[ $id =~ ^key-[a-zA-Z0-9]{8}$ && $name =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,31}-[a-zA-Z0-9]{8}$ && $name == *-"${id#key-}" ]] || die '密钥文件名记录不正确。'
+        printf '%s/%s\n' "$dir" "$name"
+        return
+    fi
     if [[ $id =~ ^key-[a-zA-Z0-9]{8}$ ]]; then
         printf '%s/lts-%s\n' "$dir" "${id#key-}"
     elif [[ $id =~ ^key-[0-9]{8}T[0-9]{6}Z-[a-zA-Z0-9]{24}$ ]]; then
@@ -713,12 +722,38 @@ temp_key_open_dir() (
     printf '\033]0;root@server:%s\007' "$PWD"
     bash --noprofile --norc -i || true
 )
+temp_key_edit_prefix() (
+    local prefix staged parent=${TEMP_PREFIX_CONFIG%/*}
+    [[ ! -L $parent && ! -L $TEMP_PREFIX_CONFIG && ( ! -e $TEMP_PREFIX_CONFIG || -f $TEMP_PREFIX_CONFIG ) ]] || die '密钥抬头配置路径不正确。'
+    say '设置临时密钥文件抬头，例如 hk01、aliyun01；生成文件为 抬头-随机编号。'
+    say '支持 1–32 位字母、数字、点、下划线和短横线，以字母或数字开头。留空取消。'
+    while true; do
+        read -r -p '自定义抬头：' prefix || return 1
+        [[ -n $prefix ]] || return 1
+        [[ $prefix =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,31}$ ]] && break
+        say '抬头格式不正确，请重新输入。'
+    done
+    install -d -m 700 "$parent" || return 1
+    staged=$(mktemp "$parent/.prefix.XXXXXXXX") || return 1
+    trap 'rm -f -- "$staged"' EXIT
+    printf '%s\n' "$prefix" > "$staged" || return 1
+    chmod 600 "$staged" || return 1
+    mv -f -- "$staged" "$TEMP_PREFIX_CONFIG" || return 1
+    say "抬头已保存：$prefix；仅用于之后生成的密钥，已有密钥名称保留。"
+)
 temp_key_create() (
     temp_key_paths
     temp_key_preflight
-    local dir id keyfile staged=''
+    local dir id keyfile prefix staged=''
+    if [[ ! -f $TEMP_PREFIX_CONFIG ]]; then
+        temp_key_edit_prefix || { say '已取消生成临时密钥。'; return 1; }
+    fi
+    [[ ! -L $TEMP_PREFIX_CONFIG ]] || die '密钥抬头配置不能是符号链接。'
+    prefix=$(cat "$TEMP_PREFIX_CONFIG")
+    [[ $prefix =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,31}$ ]] || die '密钥抬头配置无效，请在菜单第 5 项重新设置。'
     dir=$(mktemp -d "$TEMP_ROOT/key-XXXXXXXX")
     id=${dir##*/}
+    printf '%s-%s\n' "$prefix" "${id#key-}" > "$dir/key-name"
     keyfile=$(temp_key_file "$dir")
     # Keep the registry on failures so any already-published key remains revocable.
     trap '[[ -z $staged ]] || rm -f -- "$staged"' EXIT
@@ -887,11 +922,12 @@ EOF
 temp_key_menu() {
     local c
     while true; do
-        say $'\n临时维护密钥（root）：\n1) 一键生成并添加临时密钥\n2) 查看密钥列表及私钥路径\n3) 按数字序号撤销临时密钥并删除公钥和私钥\n4) 撤销全部临时密钥并删除公钥和私钥\n0) 返回'
+        say $'\n临时维护密钥（root）：\n1) 一键生成并添加临时密钥\n2) 查看密钥列表及私钥路径\n3) 按数字序号撤销临时密钥并删除公钥和私钥\n4) 撤销全部临时密钥并删除公钥和私钥\n5) 编辑自定义密钥抬头\n0) 返回'
         read -r -p '请选择：' c
         case $c in
             1) run_action temp_key_create;; 2) run_action temp_key_list;;
             3) run_action temp_key_revoke;; 4) run_action temp_key_revoke_all;;
+            5) run_action temp_key_edit_prefix || say '抬头设置未完成。';;
             0) return;; *) say '无效选择。';;
         esac
     done

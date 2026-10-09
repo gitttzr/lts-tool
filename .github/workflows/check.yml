@@ -22,6 +22,7 @@ jobs:
           bash test-dns.sh
           bash test-key-input.sh
           bash test-key-expiry.sh
+          bash test-key-prefix.sh
   sshd-integration:
     runs-on: ubuntu-latest
     strategy:
