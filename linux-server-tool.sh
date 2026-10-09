@@ -6,7 +6,7 @@ set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 umask 077
-VERSION=1.0.23
+VERSION=1.0.24
 BASE=/var/lib/linux-server-tool
 SELF=/usr/local/sbin/lts-tool
 KEY_CONFIG=/etc/lts-tool/root_authorized_keys
@@ -191,6 +191,8 @@ EOF
     say '健康守护已启用：连续失败 3 次后重启，重启冷却时间 10 分钟。SSH 连接策略保持不变。'
 }
 health_default_enable() {
+    # Old updaters source the new program and call only this hook.
+    temp_key_expiry_enable || return 1
     if [[ ${1:-} != force && -f $BASE/health-default-version ]] &&
         [[ $(cat "$BASE/health-default-version") == "$VERSION" ]]; then
         return 0
@@ -201,7 +203,7 @@ health_default_enable() {
 activate_updated_tool() {
     # Source the verified new version in a child while retaining our existing lock.
     # Running main again here would wait for the lock held by this process.
-    bash -c 'set -Eeuo pipefail; source "$1"; health_default_enable force' _ "$SELF"
+    bash -c 'set -Eeuo pipefail; source "$1"; temp_key_expiry_enable; health_default_enable force' _ "$SELF"
 }
 health_disable() {
     systemctl disable --now lts-tool-health.timer
@@ -738,7 +740,7 @@ temp_key_create() (
     say '客户端示例（替换私钥本地路径、服务器地址及端口）：'
     say "  ssh -o IdentitiesOnly=yes -i /本地路径/${keyfile##*/} -p SSH端口 root@服务器地址"
     say "维护结束后撤销：$SELF --temp-key-revoke $id"
-    say '这是完整 root 权限。密钥不会自动过期；维护结束后请撤销。'
+    say '这是完整 root 权限。创建满 24 小时后自动撤销并删除；维护结束后也可提前撤销。'
     if [[ -t 0 && -t 1 ]]; then
         temp_key_open_dir "$dir"
     else
@@ -803,6 +805,9 @@ temp_key_revoke() (
                 die '该公钥可能被手工添加了选项或复制到其他行；未修改授权，请先人工检查对应公钥。'
             fi
             temp_key_publish "$staged"
+            # Expiry calls this action from a conditional; enforce failure
+            # explicitly rather than relying on errexit in that context.
+            [[ ! -e $staged ]] || die '公钥授权移除失败，保留密钥文件。'
             staged=''
         fi
     elif [[ -f $dir/created-at && ! -f $dir/revoked-at ]]; then
@@ -810,8 +815,8 @@ temp_key_revoke() (
     fi
     # Record completed authorization removal before deleting the public record,
     # so retries after an interrupted cleanup remain safe and idempotent.
-    [[ -f $dir/revoked-at ]] || date -u +%Y-%m-%dT%H:%M:%SZ > "$dir/revoked-at"
-    rm -f -- "$keyfile" "$keyfile.pub"
+    [[ -f $dir/revoked-at ]] || date -u +%Y-%m-%dT%H:%M:%SZ > "$dir/revoked-at" || die '无法记录撤销时间。'
+    rm -f -- "$keyfile" "$keyfile.pub" || die '密钥文件删除失败。'
     say "已撤销 $id：对应公钥授权已移除，服务器上的公钥和私钥文件已删除。"
     say '已有 SSH 会话不会被断开；请结束维护会话并删除下载到其他电脑的私钥副本。'
 )
@@ -823,6 +828,61 @@ temp_key_revoke_all() {
         temp_key_revoke "${dir##*/}"
     done
     say '本工具登记的临时密钥已全部撤销，对应公钥和私钥文件已删除，其他密钥保留。'
+}
+temp_key_expire() {
+    temp_key_paths
+    local now=${1:-$(date +%s)} dir stamp epoch keyfile failed=0
+    for dir in "$TEMP_ROOT"/key-*; do
+        [[ -d $dir && ! -L $dir ]] || continue
+        keyfile=$(temp_key_file "$dir")
+        if [[ -f $dir/revoked-at ]]; then
+            [[ -e $keyfile || -e $keyfile.pub ]] || continue
+        else
+            epoch=''
+            if [[ -f $dir/created-at && ! -L $dir/created-at ]]; then
+                stamp=$(cat "$dir/created-at")
+                if [[ $stamp =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+                    epoch=$(date -u -d "$stamp" +%s 2>/dev/null) || epoch=''
+                fi
+            fi
+            # Old interrupted registrations may lack created-at; use key mtime.
+            if [[ -z $epoch && -f $keyfile.pub && ! -L $keyfile.pub ]]; then
+                epoch=$(stat -c %Y "$keyfile.pub") || epoch=''
+            fi
+            if [[ -n $epoch && $epoch =~ ^[0-9]+$ && $now -lt $((epoch + 86400)) ]]; then continue; fi
+        fi
+        # Reuse authorization-first revocation; never delete a key while its
+        # authorization removal failed. Continue cleaning other registrations.
+        if ! (set -e; temp_key_revoke "${dir##*/}"); then
+            say "自动过期清理失败：${dir##*/}，下次重试。"; failed=1
+        fi
+    done
+    return "$failed"
+}
+temp_key_expiry_enable() {
+    if [[ ! -f $BASE/temp-key-expiry-version ]] || [[ $(cat "$BASE/temp-key-expiry-version") != "$VERSION" ]]; then
+        cat > /etc/systemd/system/lts-tool-key-expiry.service <<EOF
+[Unit]
+Description=Revoke expired lts-tool temporary SSH keys
+[Service]
+Type=oneshot
+ExecStart=/bin/bash $SELF --temp-key-expire
+EOF
+        cat > /etc/systemd/system/lts-tool-key-expiry.timer <<'EOF'
+[Unit]
+Description=Check temporary SSH key expiry every minute
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=1s
+[Install]
+WantedBy=timers.target
+EOF
+        systemctl daemon-reload || return 1
+        systemctl enable --now lts-tool-key-expiry.timer || return 1
+        printf '%s\n' "$VERSION" > "$BASE/temp-key-expiry-version"
+    fi
+    temp_key_expire
 }
 temp_key_menu() {
     local c
@@ -1472,12 +1532,18 @@ main() {
         health_check
         return
     fi
+    if [[ ${1:-} == --temp-key-expire ]]; then
+        flock -n 9 || return 0
+        temp_key_expire
+        return
+    fi
     flock 9
     # Recovery must work even when an older pending change blocks installation.
     if [[ ${1:-} == --rescue-ssh ]]; then rescue_public_ssh; return; fi
     # Do not hold the lock while an interactive menu waits for input.
     init_key_config
     install_self
+    temp_key_expiry_enable
     case ${1:-} in
         --install) health_default_enable force; say "lts-tool 安装/更新完成，健康守护已默认启用。长期公钥配置保留在 $KEY_CONFIG。执行 sudo lts-tool 打开菜单。"; return;;
         --update) update_tool; return;;

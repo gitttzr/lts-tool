@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 source "$(dirname "$0")/linux-server-tool.sh"
+temp_key_expiry_enable() { :; } # Health fixtures never create real key timers.
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 HEALTH_STATE=$work/state
@@ -96,6 +97,7 @@ echo 'PASS: health thresholds, cooldown across inactive state, deliberate stops,
     SELF=$work/new-version
     export TEST_ACTIVATION_LOG=$work/new-version-activation
     cat > "$SELF" <<'EOF'
+temp_key_expiry_enable() { :; }
 health_default_enable() {
     [[ $1 == force ]] || return 1
     echo new-version-enabled > "$TEST_ACTIVATION_LOG"
