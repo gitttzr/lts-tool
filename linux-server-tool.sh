@@ -6,7 +6,7 @@ set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 umask 077
-VERSION=1.0.24
+VERSION=1.0.25
 BASE=/var/lib/linux-server-tool
 SELF=/usr/local/sbin/lts-tool
 KEY_CONFIG=/etc/lts-tool/root_authorized_keys
@@ -1568,7 +1568,9 @@ main() {
     flock -u 9
     local c
     while true; do
-        say $'\nLinux 服务器工具\n1) Tailscale 管理\n2) SSH 管理\n3) 临时维护密钥（root）\n4) 更新工具\n5) 健康守护\n6) 谷歌 BBR（永久启用）\n0) 退出'
+        say ""
+        say "Linux 服务器工具（版本 $VERSION）"
+        say $'1) Tailscale 管理\n2) SSH 管理\n3) 临时维护密钥（root）\n4) 更新工具\n5) 健康守护\n6) 谷歌 BBR（永久启用）\n0) 退出'
         read -r -p '请选择：' c
         # Submenus run in a child, so errors return to the main menu.
         case $c in
