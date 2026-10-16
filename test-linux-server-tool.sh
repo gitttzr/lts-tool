@@ -140,12 +140,15 @@ cmp "$TEMP_AUTH" "$work/original-authorized"
     bash() {
         [[ $* == '--noprofile --norc -i' ]]
         [[ $PWD == "$second" ]]
-        [[ $PROMPT_COMMAND == *'root@server:'* ]]
+        [[ $PROMPT_COMMAND == _lts_key_cwd ]]
+        [[ $(declare -F _lts_key_cwd) == _lts_key_cwd ]]
         flock -n "$work/download-lock" -c true
         echo shell-opened > "$work/download-shell"
     }
     temp_key_open_dir "$second" > "$work/download-output"
     [[ -f $work/download-shell ]]
+    grep -qF -- "$(printf '\033]633;P;Cwd=%s\007' "$second")" "$work/download-output"
+    grep -qF -- "$(printf '\033]633;P;Cwd=%s\007' "$PWD")" "$work/download-output"
 )
 say 'PASS: legacy revocation compatibility and download shell directory/title/lock release'
 

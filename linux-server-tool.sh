@@ -6,7 +6,7 @@ set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 umask 077
-VERSION=1.0.27
+VERSION=1.0.28
 BASE=/var/lib/linux-server-tool
 SELF=/usr/local/sbin/lts-tool
 KEY_CONFIG=/etc/lts-tool/root_authorized_keys
@@ -708,19 +708,31 @@ temp_key_file() {
         printf '%s/id_ed25519\n' "$dir"
     fi
 }
+_lts_key_cwd() {
+    local cwd=$PWD host=${HOSTNAME:-server}
+    host=${host//[^a-zA-Z0-9_.-]/_}
+    cwd=${cwd//\\/\\\\}
+    cwd=${cwd//;/\\x3b}
+    # Electerm uses OSC 633 Cwd; Xshell/Xftp use the terminal title.
+    printf '\033]0;root@%s:%s\007' "$host" "$PWD"
+    printf '\033]633;P;Cwd=%s\007\033]633;A\007' "$cwd"
+}
 temp_key_open_dir() (
-    local dir=$1
+    local dir=$1 origin=$PWD
     cd -- "$dir" || return $?
     # Do not hold the operation lock while the user downloads files.
     flock -u 9 2>/dev/null || true
     exec 9>&-
-    say '已进入密钥目录。现在可从 Xshell 打开 Xftp/文件管理器下载私钥。'
+    say "已进入密钥目录：$PWD"
+    say '请在客户端启用 SFTP 跟随终端目录，然后切换到 SFTP 下载私钥。'
     say '下载后输入 exit 返回工具菜单；关闭此临时 Shell 不会撤销密钥。'
-    # Xshell/Xftp use the terminal title to discover the current directory.
-    export PROMPT_COMMAND='printf "\033]0;root@server:%s\007" "$PWD"'
-    export PS1='[lts-key-download] \w # '
-    printf '\033]0;root@server:%s\007' "$PWD"
+    export -f _lts_key_cwd
+    export PROMPT_COMMAND='_lts_key_cwd'
+    export PS1='\u@\h:\w\$ \[\e]633;B\a\]'
+    _lts_key_cwd
     bash --noprofile --norc -i || true
+    cd -- "$origin" || return 1
+    _lts_key_cwd
 )
 temp_key_edit_prefix() (
     local prefix staged parent=${TEMP_PREFIX_CONFIG%/*}
