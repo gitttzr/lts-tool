@@ -6,7 +6,7 @@ set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 umask 077
-VERSION=1.0.26
+VERSION=1.0.27
 BASE=/var/lib/linux-server-tool
 SELF=/usr/local/sbin/lts-tool
 KEY_CONFIG=/etc/lts-tool/root_authorized_keys
@@ -741,16 +741,28 @@ temp_key_edit_prefix() (
     mv -f -- "$staged" "$TEMP_PREFIX_CONFIG" || return 1
     say "抬头已保存：$prefix；仅用于之后生成的密钥，已有密钥名称保留。"
 )
+temp_key_read_days() {
+    local days
+    while true; do
+        read -r -p '临时密钥有效期（天，默认 3，范围 1–36500）：' days || days=''
+        days=${days:-3}
+        if [[ $days =~ ^[0-9]{1,5}$ ]] && ((10#$days >= 1 && 10#$days <= 36500)); then
+            printf '%s\n' "$((10#$days))"; return 0
+        fi
+        say '请输入 1–36500 的整数天数。' >&2
+    done
+}
 temp_key_create() (
     temp_key_paths
     temp_key_preflight
-    local dir id keyfile prefix staged=''
+    local dir id keyfile prefix days staged=''
     if [[ ! -f $TEMP_PREFIX_CONFIG ]]; then
         temp_key_edit_prefix || { say '已取消生成临时密钥。'; return 1; }
     fi
     [[ ! -L $TEMP_PREFIX_CONFIG ]] || die '密钥抬头配置不能是符号链接。'
     prefix=$(cat "$TEMP_PREFIX_CONFIG")
     [[ $prefix =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,31}$ ]] || die '密钥抬头配置无效，请在菜单第 5 项重新设置。'
+    days=$(temp_key_read_days) || return 1
     dir=$(mktemp -d "$TEMP_ROOT/key-XXXXXXXX")
     id=${dir##*/}
     printf '%s-%s\n' "$prefix" "${id#key-}" > "$dir/key-name"
@@ -760,6 +772,7 @@ temp_key_create() (
     ssh-keygen -q -t ed25519 -N '' -C "lts-tool-temp:$id" -f "$keyfile"
     chmod 600 "$keyfile" "$keyfile.pub"
     date -u +%Y-%m-%dT%H:%M:%SZ > "$dir/created-at"
+    printf '%s\n' "$days" > "$dir/valid-days"
     staged=$(mktemp "${TEMP_AUTH%/*}/.lts-key.XXXXXXXX")
     if [[ -f $TEMP_AUTH ]]; then
         cp --preserve=all -- "$TEMP_AUTH" "$staged"
@@ -775,7 +788,7 @@ temp_key_create() (
     say '客户端示例（替换私钥本地路径、服务器地址及端口）：'
     say "  ssh -o IdentitiesOnly=yes -i /本地路径/${keyfile##*/} -p SSH端口 root@服务器地址"
     say "维护结束后撤销：$SELF --temp-key-revoke $id"
-    say '这是完整 root 权限。创建满 24 小时后自动撤销并删除；维护结束后也可提前撤销。'
+    say "这是完整 root 权限。有效期 $days 天，到期自动撤销并删除；维护结束后也可提前撤销。"
     if [[ -t 0 && -t 1 ]]; then
         temp_key_open_dir "$dir"
     else
@@ -801,6 +814,7 @@ temp_key_list() {
         elif [[ -f $keyfile.pub ]]; then
             say "$id  未撤销（授权是否可用以实际 SSH 登录为准）"
             say "  私钥：$keyfile"
+            say "  有效期：$(cat "$dir/valid-days" 2>/dev/null || echo 1) 天（从创建时计算）"
             ssh-keygen -lf "$keyfile.pub"
         else
             say "$id  生成未完成；未添加公钥，可选择该编号清理。"
@@ -866,13 +880,24 @@ temp_key_revoke_all() {
 }
 temp_key_expire() {
     temp_key_paths
-    local now=${1:-$(date +%s)} dir stamp epoch keyfile failed=0
+    local now=${1:-$(date +%s)} dir stamp epoch keyfile days failed=0
     for dir in "$TEMP_ROOT"/key-*; do
         [[ -d $dir && ! -L $dir ]] || continue
         keyfile=$(temp_key_file "$dir")
         if [[ -f $dir/revoked-at ]]; then
             [[ -e $keyfile || -e $keyfile.pub ]] || continue
         else
+            days=1 # Existing keys retain their original 24-hour policy.
+            if [[ -e $dir/valid-days || -L $dir/valid-days ]]; then
+                if [[ ! -f $dir/valid-days || -L $dir/valid-days ]]; then
+                    say "有效期记录不正确：${dir##*/}"; failed=1; continue
+                fi
+                days=$(cat "$dir/valid-days")
+                if [[ ! $days =~ ^[0-9]{1,5}$ ]] || ((10#$days < 1 || 10#$days > 36500)); then
+                    say "有效期记录不正确：${dir##*/}"; failed=1; continue
+                fi
+                days=$((10#$days))
+            fi
             epoch=''
             if [[ -f $dir/created-at && ! -L $dir/created-at ]]; then
                 stamp=$(cat "$dir/created-at")
@@ -884,7 +909,7 @@ temp_key_expire() {
             if [[ -z $epoch && -f $keyfile.pub && ! -L $keyfile.pub ]]; then
                 epoch=$(stat -c %Y "$keyfile.pub") || epoch=''
             fi
-            if [[ -n $epoch && $epoch =~ ^[0-9]+$ && $now -lt $((epoch + 86400)) ]]; then continue; fi
+            if [[ -n $epoch && $epoch =~ ^[0-9]+$ && $now -lt $((epoch + days * 86400)) ]]; then continue; fi
         fi
         # Reuse authorization-first revocation; never delete a key while its
         # authorization removal failed. Continue cleaning other registrations.

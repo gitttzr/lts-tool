@@ -61,8 +61,8 @@ ssh-keygen -q -t ed25519 -N '' -C permanent -f "$work/permanent"
     cat "$work/permanent.pub"
 } > "$TEMP_AUTH"
 cp "$TEMP_AUTH" "$work/original-authorized"
-temp_key_create > "$work/create-1.log"
-temp_key_create > "$work/create-2.log"
+temp_key_create <<< '' > "$work/create-1.log"
+temp_key_create <<< '' > "$work/create-2.log"
 mapfile -t dirs < <(find "$TEMP_ROOT" -mindepth 1 -maxdepth 1 -type d | sort)
 [[ ${#dirs[@]} == 2 ]]
 first=${dirs[0]}; second=${dirs[1]}
@@ -151,7 +151,7 @@ say 'PASS: legacy revocation compatibility and download shell directory/title/lo
 
 # Appending to a key file without a final newline must not join two keys.
 printf '%s' "$(cat "$work/permanent.pub")" > "$TEMP_AUTH"
-temp_key_create > /dev/null
+temp_key_create <<< '' > /dev/null
 [[ $(wc -l < "$TEMP_AUTH") == 2 ]]
 [[ $(head -n 1 "$TEMP_AUTH") == "$(cat "$work/permanent.pub")" ]]
 temp_key_revoke_all > /dev/null

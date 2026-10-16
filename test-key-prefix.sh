@@ -22,7 +22,7 @@ secondfile=$(temp_key_file "$second")
 temp_key_revoke "${first##*/}" >/dev/null
 [[ ! -e $firstfile && ! -e $firstfile.pub && -f $secondfile ]]
 echo 2026-01-01T00:00:00Z > "$second/created-at"
-temp_key_expire "$(date -u -d 2026-01-02T00:00:00Z +%s)" >/dev/null
+temp_key_expire "$(date -u -d 2026-01-04T00:00:00Z +%s)" >/dev/null
 [[ ! -e $secondfile && ! -e $secondfile.pub ]]
 temp_key_edit_prefix <<< '' >/dev/null && exit 1
 [[ $(cat "$TEMP_PREFIX_CONFIG") == tw02 ]]

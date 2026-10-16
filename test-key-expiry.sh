@@ -27,3 +27,18 @@ temp_key_expire "$((now+1))" >/dev/null
 cmp "$TEMP_AUTH" "$work/expected"
 temp_key_expire "$((now+1))" >/dev/null
 echo 'PASS: 24h boundary, legacy keys, permanent authorization preserved, repeated cleanup'
+[[ $(temp_key_read_days <<< '') == 3 ]]
+[[ $(temp_key_read_days <<< 7) == 7 ]]
+[[ $(printf '0\n-1\nabc\n1.5\n36501\n2\n' | temp_key_read_days 2>/dev/null) == 2 ]]
+mkdir -p "$TEMP_ROOT/key-Ttl12345"
+ttlfile=$(temp_key_file "$TEMP_ROOT/key-Ttl12345")
+ssh-keygen -q -t ed25519 -N '' -f "$ttlfile"
+cat "$ttlfile.pub" >> "$TEMP_AUTH"
+echo 2026-10-01T00:00:00Z > "$TEMP_ROOT/key-Ttl12345/created-at"
+echo 3 > "$TEMP_ROOT/key-Ttl12345/valid-days"
+temp_key_expire "$((now+86400))" >/dev/null
+[[ -f $ttlfile ]]
+temp_key_expire "$((now+172800))" >/dev/null
+[[ ! -e $ttlfile ]]
+cmp "$TEMP_AUTH" "$work/expected"
+echo 'PASS: default/custom days, invalid input retries, 3-day expiry and legacy policy coexist'
