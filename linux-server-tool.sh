@@ -6,7 +6,7 @@ set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 umask 077
-VERSION=1.0.28
+VERSION=1.0.29
 BASE=/var/lib/linux-server-tool
 SELF=/usr/local/sbin/lts-tool
 KEY_CONFIG=/etc/lts-tool/root_authorized_keys
@@ -19,6 +19,7 @@ BBR_SYSCTL=/etc/sysctl.d/99-lts-tool-bbr.conf
 BBR_MODULES=/etc/modules-load.d/lts-tool-bbr.conf
 BBR_SERVICE=/etc/systemd/system/lts-tool-bbr.service
 NETWORKD_CONFIG=/etc/systemd/network
+SYSTEMD_CONFIG=/etc/systemd/system
 
 bbr_status() {
     say "当前 TCP 拥塞控制：$(sysctl -n net.ipv4.tcp_congestion_control)"
@@ -366,6 +367,62 @@ run_action() (
 )
 
 # One transaction at a time; timer and confirmation share the same flock.
+backup_absolute_file() {
+    local source=$1 destination=$2 target
+    [[ $source == /* && $source != */../* && $source != */./* ]] || return 1
+    target=$destination/${source#/}
+    install -d -m 700 "${target%/*}" || return 1
+    cp -a -- "$source" "$target"
+}
+service_diagnostics() {
+    local unit=$1
+    say "服务操作失败：$unit；以下为本次启动的状态和日志。" >&2
+    systemctl status "$unit" --no-pager --full >&2 || true
+    journalctl -b -u "$unit" -n 40 --no-pager >&2 || true
+}
+ssh_socket_files() {
+    printf '%s\n' "$SYSTEMD_CONFIG/ssh.service.d/00-socket.conf" "$SYSTEMD_CONFIG/ssh.socket.d/addresses.conf"
+}
+ssh_save_activation() {
+    local backup=$1 file
+    install -d -m 700 "$backup" || return 1
+    while IFS= read -r file; do
+        if [[ -e $file || -L $file ]]; then
+            backup_absolute_file "$file" "$backup/activation" || return 1
+        fi
+    done < <(ssh_socket_files)
+    touch "$backup/activation.saved"
+}
+ssh_disable_activation() {
+    local file socket
+    while IFS= read -r file; do
+        rm -f -- "$file" || return 1
+    done < <(ssh_socket_files)
+    systemctl daemon-reload || return 1
+    for socket in ssh.socket sshd.socket; do
+        if unit_exists "$socket"; then
+            systemctl disable --now "$socket" || { service_diagnostics "$socket"; return 1; }
+        fi
+    done
+    # Disabling a socket does not remove Requires/Wants edges from other files.
+    local deps
+    deps=$(systemctl show "$SSH_UNIT" -p Requires -p Wants --value) || return 1
+    if grep -Eq '(^|[[:space:]])sshd?\.socket([[:space:]]|$)' <<< "$deps"; then
+        say '仍有自定义 SSH socket 依赖，请检查服务配置；未强制清除其他依赖。' >&2
+        return 1
+    fi
+}
+ssh_restore_activation() {
+    local backup=$1 file saved
+    [[ -f $backup/activation.saved ]] || return 0
+    while IFS= read -r file; do
+        saved=$backup/activation/${file#/}
+        if [[ -e $saved || -L $saved ]]; then
+            install -d "${file%/*}" || return 1
+            cp -a -- "$saved" "$file" || return 1
+        else rm -f -- "$file" || return 1; fi
+    done < <(ssh_socket_files)
+}
 begin_change() {
     no_pending
     SSH_UNIT=$(ssh_unit)
@@ -376,10 +433,11 @@ begin_change() {
     install -d "$BACKUP/files"
     local f
     while IFS= read -r -d '' f; do
-        cp -a --parents "$f" "$BACKUP/files"
+        backup_absolute_file "$f" "$BACKUP/files" || die "SSH 配置备份失败：$f"
     done < <(find /etc/ssh -maxdepth 1 -type f -name sshd_config -print0;
              find /etc/ssh/sshd_config.d -maxdepth 1 -type f -name '*.conf' -print0 2>/dev/null || true)
     [[ ! -L $CONF ]] || die 'sshd_config 是符号链接，请先改为常规文件。'
+    ssh_save_activation "$BACKUP" || die 'SSH socket 配置备份失败，停止修改。'
     printf '%s\n' "$SSH_UNIT" > "$BACKUP/unit"
     if [[ -f /etc/systemd/system/$SSH_UNIT.d/90-linux-server-tool.conf ]]; then
         cp -a "/etc/systemd/system/$SSH_UNIT.d/90-linux-server-tool.conf" "$BACKUP/ssh-dropin"
@@ -421,6 +479,12 @@ rollback() {
     token=$(cat "$BASE/pending"); dir=$BASE/backup-$token
     [[ -d $dir/files/etc/ssh ]] || die '备份不存在，停止回退。'
     unit=$(cat "$dir/unit")
+    # Release both listeners before restoring socket activation; leave session
+    # child processes alone, never pkill all sshd processes.
+    systemctl stop "$unit" || { service_diagnostics "$unit"; return 1; }
+    for socket in ssh.socket sshd.socket; do
+        if unit_exists "$socket"; then systemctl stop "$socket" || return 1; fi
+    done
     cp -a "$dir/files/etc/ssh/." /etc/ssh/
     if [[ -f $dir/ssh-dropin ]]; then
         cp -a "$dir/ssh-dropin" "/etc/systemd/system/$unit.d/90-linux-server-tool.conf"
@@ -428,14 +492,17 @@ rollback() {
         rm -f "/etc/systemd/system/$unit.d/90-linux-server-tool.conf"
     fi
     validate_sshd
+    ssh_restore_activation "$dir" || return 1
     systemctl daemon-reload
     for socket in ssh.socket sshd.socket; do
         if grep -qx enabled "$dir/$socket.enabled"; then systemctl enable "$socket"; fi
-        if grep -qx active "$dir/$socket.active"; then systemctl start "$socket"; fi
+        if grep -qx active "$dir/$socket.active"; then
+            systemctl start "$socket" || { service_diagnostics "$socket"; return 1; }
+        fi
     done
     ensure_sshd_runtime
     systemctl reset-failed "$unit" || true
-    systemctl restart "$unit"
+    systemctl start "$unit" || { service_diagnostics "$unit"; return 1; }
     rm -f "$BASE/pending"
     systemctl disable --now linux-server-tool-rollback.timer || true
     say '已恢复修改前的 SSH 配置。'
@@ -456,17 +523,13 @@ confirm_change() {
 }
 finish_change() {
     validate_sshd
-    # Disable socket activation so sshd_config controls listening addresses/ports.
-    local socket
-    for socket in ssh.socket sshd.socket; do
-        if unit_exists "$socket"; then systemctl disable --now "$socket"; fi
-    done
+    ssh_disable_activation || return 1
     keep_ssh_alive
     ensure_sshd_runtime
     systemctl reset-failed "$SSH_UNIT" || true
     systemctl enable "$SSH_UNIT"
-    systemctl restart "$SSH_UNIT"
-    systemctl is-active --quiet "$SSH_UNIT"
+    systemctl restart "$SSH_UNIT" || { service_diagnostics "$SSH_UNIT"; return 1; }
+    systemctl is-active --quiet "$SSH_UNIT" || { service_diagnostics "$SSH_UNIT"; return 1; }
     if [[ ${1:-normal} == rescue ]]; then
         say 'Public SSH listening restored. No automatic rollback is scheduled.'
         say 'SSH port and authentication policy are unchanged. Check firewall/security-group access.'
@@ -1335,7 +1398,7 @@ dns_restore_default() (
         [[ -e $file || -L $file ]] || continue
         [[ -f $file && ! -L $file ]] || die "配置路径不支持：$file"
         rel=${file#/}
-        cp -a --parents "$file" "$backup"
+        backup_absolute_file "$file" "$backup" || die "DNS 配置备份失败：$file"
         printf 'cp -a %q %q\n' "$backup/$rel" "$file" >> "$backup/restore.sh"
         overrides+=("$file")
     done

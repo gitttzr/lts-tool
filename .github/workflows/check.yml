@@ -23,6 +23,7 @@ jobs:
           bash test-key-input.sh
           bash test-key-expiry.sh
           bash test-key-prefix.sh
+          bash test-ubuntu24-compat.sh
   sshd-integration:
     runs-on: ubuntu-latest
     strategy:
@@ -38,4 +39,5 @@ jobs:
             apt-get update -qq
             DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends openssh-server openssh-client iproute2
             bash /repo/test-sshd-container.sh
+            bash /repo/test-ubuntu24-compat.sh
           '
