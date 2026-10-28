@@ -42,3 +42,8 @@ journalctl() { printf '%s\n' "$*" > "$work/journal-args"; }
 service_diagnostics ssh.service 2>/dev/null
 grep -qx -- '-b -u ssh.service -n 40 --no-pager' "$work/journal-args"
 echo 'PASS: absolute backup from unrelated cwd, socket dependency removal and restoration, custom config preservation, unknown dependency refusal, bounded service diagnostics'
+systemctl() { [[ $* != *ActiveState* ]] || echo active; return 0; }
+if ssh_cleanup_orphan_listeners ssh.service >/dev/null 2>&1; then exit 1; fi
+systemctl() { [[ $* != *ActiveState* ]] || echo inactive; return 0; }
+ssh_cleanup_orphan_listeners ssh.service
+echo 'PASS: no orphan cleanup while service active, empty stopped cgroup is safe'

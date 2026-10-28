@@ -6,7 +6,7 @@ set -Eeuo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 umask 077
-VERSION=1.0.29
+VERSION=1.0.30
 BASE=/var/lib/linux-server-tool
 SELF=/usr/local/sbin/lts-tool
 KEY_CONFIG=/etc/lts-tool/root_authorized_keys
@@ -380,6 +380,40 @@ service_diagnostics() {
     systemctl status "$unit" --no-pager --full >&2 || true
     journalctl -b -u "$unit" -n 40 --no-pager >&2 || true
 }
+ssh_cleanup_orphan_listeners() {
+    local unit=$1 state group
+    state=$(systemctl show "$unit" -p ActiveState --value) || return 1
+    [[ $state == inactive || $state == failed ]] || { say 'SSH 服务尚未停止，不清理监听进程。' >&2; return 1; }
+    group=$(systemctl show "$unit" -p ControlGroup --value) || return 1
+    [[ -n $group ]] || return 0
+    [[ $group == /* && $group != / ]] || return 1
+    /usr/bin/python3 - "$group" <<'PY'
+import os, pathlib, re, select, signal, subprocess, sys
+group = sys.argv[1]
+listing = subprocess.check_output(['ss', '-H', '-lntp'], text=True)
+for pid in sorted(set(map(int, re.findall(r'pid=(\d+)', listing)))):
+    fd = None
+    try:
+        fd = os.pidfd_open(pid)
+        p = pathlib.Path('/proc') / str(pid)
+        exe = os.readlink(p / 'exe')
+        cmd = (p / 'cmdline').read_bytes().replace(b'\0', b' ')
+        groups = [line.split(':', 2)[2] for line in (p / 'cgroup').read_text().splitlines()]
+        if exe != '/usr/sbin/sshd' or b'[listener]' not in cmd or group not in groups:
+            continue
+        print(f'Removing orphan SSH listener PID {pid}; login sessions are not targeted.', flush=True)
+        signal.pidfd_send_signal(fd, signal.SIGTERM)
+        poll = select.poll()
+        poll.register(fd, select.POLLIN)
+        if not poll.poll(5000):
+            raise RuntimeError(f'SSH listener {pid} did not exit; no forced kill performed')
+    except ProcessLookupError:
+        pass
+    finally:
+        if fd is not None:
+            os.close(fd)
+PY
+}
 ssh_socket_files() {
     printf '%s\n' "$SYSTEMD_CONFIG/ssh.service.d/00-socket.conf" "$SYSTEMD_CONFIG/ssh.socket.d/addresses.conf"
 }
@@ -482,6 +516,7 @@ rollback() {
     # Release both listeners before restoring socket activation; leave session
     # child processes alone, never pkill all sshd processes.
     systemctl stop "$unit" || { service_diagnostics "$unit"; return 1; }
+    ssh_cleanup_orphan_listeners "$unit" || return 1
     for socket in ssh.socket sshd.socket; do
         if unit_exists "$socket"; then systemctl stop "$socket" || return 1; fi
     done
@@ -527,8 +562,10 @@ finish_change() {
     keep_ssh_alive
     ensure_sshd_runtime
     systemctl reset-failed "$SSH_UNIT" || true
+    systemctl stop "$SSH_UNIT" || { service_diagnostics "$SSH_UNIT"; return 1; }
+    ssh_cleanup_orphan_listeners "$SSH_UNIT" || return 1
     systemctl enable "$SSH_UNIT"
-    systemctl restart "$SSH_UNIT" || { service_diagnostics "$SSH_UNIT"; return 1; }
+    systemctl start "$SSH_UNIT" || { service_diagnostics "$SSH_UNIT"; return 1; }
     systemctl is-active --quiet "$SSH_UNIT" || { service_diagnostics "$SSH_UNIT"; return 1; }
     if [[ ${1:-normal} == rescue ]]; then
         say 'Public SSH listening restored. No automatic rollback is scheduled.'
@@ -1676,6 +1713,7 @@ main() {
     flock 9
     # Recovery must work even when an older pending change blocks installation.
     if [[ ${1:-} == --rescue-ssh ]]; then rescue_public_ssh; return; fi
+    if [[ ${1:-} == --rollback ]]; then rollback; return; fi
     # Do not hold the lock while an interactive menu waits for input.
     init_key_config
     install_self

@@ -24,6 +24,7 @@ jobs:
           bash test-key-expiry.sh
           bash test-key-prefix.sh
           bash test-ubuntu24-compat.sh
+          python3 test-ssh-orphan.py
   sshd-integration:
     runs-on: ubuntu-latest
     strategy:
@@ -37,7 +38,8 @@ jobs:
           docker run --rm -e LTS_SSHD_TEST_CONTAINER=1 -v "$PWD:/repo:ro" "${{ matrix.image }}" bash -c '
             set -e
             apt-get update -qq
-            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends openssh-server openssh-client iproute2
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends openssh-server openssh-client iproute2 python3
             bash /repo/test-sshd-container.sh
             bash /repo/test-ubuntu24-compat.sh
+            python3 /repo/test-ssh-orphan.py
           '
